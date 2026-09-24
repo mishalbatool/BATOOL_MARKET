@@ -17,13 +17,21 @@ export function createWhatsAppUrl(message: string): string {
 export function getSingleProductWhatsAppLink(
   product: Product,
   quantity: number = 1,
-  customer?: Partial<CustomerDetails>
+  customer?: Partial<CustomerDetails>,
+  selectedSize?: string,
+  selectedColor?: string
 ): string {
   const lineTotal = product.salePrice * quantity;
 
   let msg = `Assalam o Alaikum Batool Market, I would like to order:\n\n`;
   msg += `📦 *Product:* ${product.name}\n`;
   msg += `🏷️ *Category:* ${product.category}\n`;
+  if (selectedSize) {
+    msg += `📏 *Selected Size:* ${selectedSize}\n`;
+  }
+  if (selectedColor) {
+    msg += `🎨 *Selected Color:* ${selectedColor}\n`;
+  }
   msg += `💰 *Unit Price:* Rs. ${product.salePrice.toLocaleString()}\n`;
   msg += `🔢 *Quantity:* ${quantity}\n`;
   msg += `💵 *Subtotal:* Rs. ${lineTotal.toLocaleString()}\n`;

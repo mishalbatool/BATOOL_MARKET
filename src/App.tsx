@@ -1,11 +1,22 @@
-import React, { useState, useEffect, useMemo } from 'react';
-import { Product, CartItem, CategoryName, ActivePage } from './types';
+import React, { useState, useEffect, useMemo, useCallback } from 'react';
+import { Product, CartItem, CategoryName, ActivePage, ReviewItem } from './types';
 import { 
-  loadProductsFromStorage, 
-  saveProductsToStorage, 
   loadCartFromStorage, 
   saveCartToStorage
 } from './utils/storage';
+import { 
+  subscribeToProducts, 
+  saveProductToFirestore, 
+  deleteProductFromFirestore, 
+  saveProductsLocalBackup,
+  loadProductsLocalBackup,
+  fetchAllProductsOnce,
+  fetchProductByIdFromFirestore,
+  extractProductIdFromUrl,
+  getProductShareUrl
+} from './services/productService';
+import { normalizeCategoryName } from './data/categories';
+import { testFirebaseConnection } from './firebase/config';
 import { AnnouncementBar } from './components/AnnouncementBar';
 import { Header } from './components/Header';
 import { Hero } from './components/Hero';
@@ -22,11 +33,14 @@ import { AdminDashboard } from './components/AdminDashboard';
 import { AboutSection } from './components/AboutSection';
 import { ContactSection } from './components/ContactSection';
 import { Footer } from './components/Footer';
-import { Check } from 'lucide-react';
+import { Check, AlertCircle, X, Plus, Shield } from 'lucide-react';
+import { subscribeToAdminAuth, isCurrentlyAdmin, logoutAdmin } from './services/authService';
 
 export default function App() {
   // 1. Core State
-  const [products, setProducts] = useState<Product[]>([]);
+  const [products, setProducts] = useState<Product[]>(() => loadProductsLocalBackup());
+  const [isLoadingProducts, setIsLoadingProducts] = useState<boolean>(true);
+  const [productsFetchError, setProductsFetchError] = useState<string | null>(null);
   const [cart, setCart] = useState<CartItem[]>([]);
   const [activePage, setActivePage] = useState<ActivePage>('home');
   const [selectedCategory, setSelectedCategory] = useState<CategoryName | null>(null);
@@ -34,19 +48,182 @@ export default function App() {
 
   // 2. Modals & Drawers
   const [detailsProduct, setDetailsProduct] = useState<Product | null>(null);
+  const [productNotFoundId, setProductNotFoundId] = useState<string | null>(null);
+  const [isLoadingDirectProduct, setIsLoadingDirectProduct] = useState<boolean>(() => Boolean(extractProductIdFromUrl()));
   const [whatsAppModalProduct, setWhatsAppModalProduct] = useState<Product | null>(null);
   const [isCartOpen, setIsCartOpen] = useState(false);
   const [isAdminOpen, setIsAdminOpen] = useState(false);
+  const [isAdmin, setIsAdmin] = useState(() => isCurrentlyAdmin());
+  const [adminInitialOpenAdd, setAdminInitialOpenAdd] = useState(false);
   const [toastText, setToastText] = useState<string | null>(null);
 
-  // Initialize from storage
+  // Subscribe to reactive admin auth state
   useEffect(() => {
-    const loadedProducts = loadProductsFromStorage();
-    setProducts(loadedProducts);
+    return subscribeToAdminAuth((status) => {
+      setIsAdmin(status);
+    });
+  }, []);
 
+  // Listen to /admin URL direct access
+  useEffect(() => {
+    if (typeof window !== 'undefined' && window.location.pathname.startsWith('/admin')) {
+      setIsAdminOpen(true);
+    }
+  }, []);
+
+  // URL-driven navigation handlers
+  const handleOpenProductDetails = useCallback((product: Product) => {
+    setDetailsProduct(product);
+    setProductNotFoundId(null);
+    if (typeof window !== 'undefined') {
+      const targetUrl = `/product/${encodeURIComponent(product.id)}`;
+      if (window.location.pathname !== targetUrl) {
+        window.history.pushState({ productId: product.id }, '', targetUrl);
+      }
+    }
+  }, []);
+
+  const handleCloseProductDetails = useCallback(() => {
+    setDetailsProduct(null);
+    setProductNotFoundId(null);
+    if (typeof window !== 'undefined') {
+      if (window.location.pathname.startsWith('/product/') || window.location.search.includes('product=')) {
+        window.history.pushState({}, '', '/');
+      }
+    }
+  }, []);
+
+  // Retry fetch manually if needed
+  const handleRetryFetch = () => {
+    setIsLoadingProducts(true);
+    setProductsFetchError(null);
+    fetchAllProductsOnce()
+      .then((items) => {
+        setProducts(items);
+        setIsLoadingProducts(false);
+      })
+      .catch((err) => {
+        setProductsFetchError(err?.message || "Failed to load products from database");
+        setIsLoadingProducts(false);
+      });
+  };
+
+  // Initialize and subscribe to Firestore shared database in real-time
+  useEffect(() => {
+    testFirebaseConnection();
+
+    // Subscribe to shared Firestore collection
+    const unsubscribe = subscribeToProducts(
+      (loadedProducts) => {
+        setProducts(loadedProducts);
+        setIsLoadingProducts(false);
+        setProductsFetchError(null);
+      },
+      (err) => {
+        console.error("Products subscription error:", err);
+        setProductsFetchError(err.message || "Failed to sync products from Firestore.");
+        setIsLoadingProducts(false);
+      }
+    );
+
+    // Load Cart from storage
     const loadedCart = loadCartFromStorage();
     setCart(loadedCart);
+
+    return () => unsubscribe();
   }, []);
+
+  // Direct Product URL Routing & Refresh Handling
+  // When a customer opens /product/BM001877554 directly or refreshes the page
+  useEffect(() => {
+    const urlProductId = extractProductIdFromUrl();
+    if (!urlProductId) {
+      return;
+    }
+
+    // If currently displaying this product, nothing to do
+    if (detailsProduct && detailsProduct.id.toLowerCase() === urlProductId.toLowerCase()) {
+      return;
+    }
+
+    // 1. Try finding in loaded products state
+    const match = products.find(p => 
+      p.id.toLowerCase() === urlProductId.toLowerCase() ||
+      (p.slug && p.slug.toLowerCase() === urlProductId.toLowerCase())
+    );
+
+    if (match) {
+      setDetailsProduct(match);
+      setProductNotFoundId(null);
+      setIsLoadingDirectProduct(false);
+      return;
+    }
+
+    // 2. Fetch directly from Firestore by ID (guarantees product loads on cold refresh)
+    let isCancelled = false;
+    setIsLoadingDirectProduct(true);
+
+    fetchProductByIdFromFirestore(urlProductId)
+      .then((fetchedProduct) => {
+        if (isCancelled) return;
+        if (fetchedProduct) {
+          setDetailsProduct(fetchedProduct);
+          setProductNotFoundId(null);
+          setProducts(prev => {
+            if (prev.some(p => p.id === fetchedProduct.id)) return prev;
+            return [fetchedProduct, ...prev];
+          });
+        } else if (!isLoadingProducts) {
+          setDetailsProduct(null);
+          setProductNotFoundId(urlProductId);
+        }
+      })
+      .catch((err) => {
+        if (isCancelled) return;
+        console.error("Direct product fetch error:", err);
+        setDetailsProduct(null);
+        setProductNotFoundId(urlProductId);
+      })
+      .finally(() => {
+        if (!isCancelled) {
+          setIsLoadingDirectProduct(false);
+        }
+      });
+
+    return () => {
+      isCancelled = true;
+    };
+  }, [products, isLoadingProducts, detailsProduct]);
+
+  // Handle browser Back / Forward buttons (popstate)
+  useEffect(() => {
+    const handlePopState = () => {
+      const urlProductId = extractProductIdFromUrl();
+      if (!urlProductId) {
+        setDetailsProduct(null);
+        setProductNotFoundId(null);
+      } else {
+        const match = products.find(p => p.id.toLowerCase() === urlProductId.toLowerCase());
+        if (match) {
+          setDetailsProduct(match);
+          setProductNotFoundId(null);
+        } else {
+          fetchProductByIdFromFirestore(urlProductId).then((fetched) => {
+            if (fetched) {
+              setDetailsProduct(fetched);
+              setProductNotFoundId(null);
+            } else {
+              setDetailsProduct(null);
+              setProductNotFoundId(urlProductId);
+            }
+          });
+        }
+      }
+    };
+
+    window.addEventListener('popstate', handlePopState);
+    return () => window.removeEventListener('popstate', handlePopState);
+  }, [products]);
 
   // Sync cart changes to storage
   useEffect(() => {
@@ -65,23 +242,30 @@ export default function App() {
   const productCounts = useMemo(() => {
     const counts: Record<string, number> = {};
     products.forEach(p => {
+      const normalized = normalizeCategoryName(p.category);
+      counts[normalized] = (counts[normalized] || 0) + 1;
       counts[p.category] = (counts[p.category] || 0) + 1;
     });
     return counts;
   }, [products]);
 
   // Cart operations
-  const handleAddToCart = (product: Product, quantity = 1) => {
+  const handleAddToCart = (product: Product, quantity = 1, selectedSize?: string, selectedColor?: string) => {
     setCart(prev => {
-      const existing = prev.find(item => item.product.id === product.id);
-      if (existing) {
-        return prev.map(item =>
-          item.product.id === product.id
+      const existingIndex = prev.findIndex(item => 
+        item.product.id === product.id && 
+        item.selectedSize === selectedSize && 
+        item.selectedColor === selectedColor
+      );
+
+      if (existingIndex > -1) {
+        return prev.map((item, idx) =>
+          idx === existingIndex
             ? { ...item, quantity: item.quantity + quantity }
             : item
         );
       }
-      return [...prev, { product, quantity }];
+      return [...prev, { product, quantity, selectedSize, selectedColor }];
     });
     triggerToast(`Added "${product.name}" to cart`);
   };
@@ -137,55 +321,107 @@ export default function App() {
   };
 
   // WhatsApp Single Product Order
-  const handleOpenWhatsAppOrder = (product: Product) => {
+  const handleOpenWhatsAppOrder = (product: Product, quantity: number = 1) => {
     setWhatsAppModalProduct(product);
   };
 
-  // Admin Actions
-  const handleSaveProduct = (product: Product) => {
+  // Add customer review to a product
+  const handleAddReview = async (productId: string, review: ReviewItem) => {
+    const target = products.find(p => p.id === productId);
+    if (!target) return;
+
+    const currentReviews = target.reviews || [];
+    const updatedReviews = [review, ...currentReviews];
+    const totalRatingSum = updatedReviews.reduce((sum, r) => sum + r.rating, 0);
+    const avgRating = Number((totalRatingSum / updatedReviews.length).toFixed(1));
+
+    const updatedProduct: Product = {
+      ...target,
+      reviews: updatedReviews,
+      reviewsCount: updatedReviews.length,
+      rating: avgRating,
+    };
+
+    // Save to Firestore shared database
+    await saveProductToFirestore(updatedProduct);
+    triggerToast("Thank you! Review published.");
+  };
+
+  // Admin Actions to Shared Database
+  const handleSaveProduct = async (product: Product) => {
+    // 1. Persist and verify in Firestore shared database FIRST.
+    // If Firestore write fails, this throws, preventing fake local saves!
+    await saveProductToFirestore(product);
+
+    // 2. Update React state immediately upon confirmed write
     setProducts(prev => {
       const exists = prev.some(p => p.id === product.id);
-      let updated: Product[];
       if (exists) {
-        updated = prev.map(p => p.id === product.id ? product : p);
-      } else {
-        updated = [product, ...prev];
+        return prev.map(p => p.id === product.id ? product : p);
       }
-      saveProductsToStorage(updated);
-      return updated;
+      return [product, ...prev];
     });
+
+    triggerToast(`Product saved successfully.`);
   };
 
-  const handleDeleteProduct = (productId: string) => {
-    setProducts(prev => {
-      const updated = prev.filter(p => p.id !== productId);
-      saveProductsToStorage(updated);
-      return updated;
-    });
-  };
+  const handleDeleteProduct = async (productId: string) => {
+    if (detailsProduct && detailsProduct.id === productId) {
+      handleCloseProductDetails();
+    }
 
-  const handleDeleteMultipleProducts = (productIds: string[]) => {
-    const idSet = new Set(productIds);
-    setProducts(prev => {
-      const updated = prev.filter(p => !idSet.has(p.id));
-      saveProductsToStorage(updated);
-      return updated;
-    });
-  };
+    // 1. Delete from Firestore shared database
+    await deleteProductFromFirestore(productId);
 
-  const handleImportProducts = (newProductList: Product[], mode: 'add' | 'replace') => {
-    setProducts(newProductList);
-    saveProductsToStorage(newProductList);
-    triggerToast(
-      mode === 'replace' 
-        ? `Replaced catalogue with ${newProductList.length} products` 
-        : `Catalogue updated (${newProductList.length} total products)`
-    );
+    // 2. Remove from React state
+    setProducts(prev => prev.filter(p => p.id !== productId));
+    triggerToast("Product removed successfully");
   };
 
   return (
     <div className="min-h-screen flex flex-col bg-[#FAF9F5] text-stone-900 selection:bg-amber-100 selection:text-amber-900 font-sans">
       
+      {/* Admin Utility Bar - ONLY shown to authenticated store manager */}
+      {isAdmin && (
+        <div className="bg-stone-900 text-stone-200 px-4 py-2 text-xs flex flex-wrap items-center justify-between gap-2 border-b border-amber-600/40 z-30 sticky top-0 shadow-md">
+          <div className="flex items-center gap-2">
+            <span className="inline-block w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+            <span className="font-semibold text-white">Store Admin:</span>
+            <span className="text-stone-400 font-mono text-[11px]">mishalbatool572@gmail.com</span>
+          </div>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => {
+                setAdminInitialOpenAdd(true);
+                setIsAdminOpen(true);
+              }}
+              className="bg-amber-600 hover:bg-amber-700 text-white font-semibold px-3 py-1.5 rounded-lg text-xs flex items-center gap-1.5 transition-colors shadow-xs cursor-pointer"
+            >
+              <Plus className="w-3.5 h-3.5 stroke-[2.5]" />
+              <span>Add Product</span>
+            </button>
+            <button
+              onClick={() => {
+                setAdminInitialOpenAdd(false);
+                setIsAdminOpen(true);
+              }}
+              className="bg-stone-800 hover:bg-stone-700 text-stone-200 px-3 py-1.5 rounded-lg text-xs transition-colors cursor-pointer"
+            >
+              Manage Products ({products.length})
+            </button>
+            <button
+              onClick={async () => {
+                await logoutAdmin();
+                triggerToast("Admin session logged out");
+              }}
+              className="text-stone-400 hover:text-white px-2 py-1.5 text-xs transition-colors cursor-pointer"
+            >
+              Logout
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* 1. Top Announcement Bar */}
       <AnnouncementBar />
 
@@ -234,7 +470,10 @@ export default function App() {
             {/* Featured Products */}
             <FeaturedProducts
               products={products}
-              onViewDetails={setDetailsProduct}
+              isLoading={isLoadingProducts}
+              error={productsFetchError}
+              onRetry={handleRetryFetch}
+              onViewDetails={handleOpenProductDetails}
               onOrderWhatsApp={handleOpenWhatsAppOrder}
               onAddToCart={handleAddToCart}
               onViewAll={handleShopNow}
@@ -246,7 +485,8 @@ export default function App() {
             {/* New Arrivals Section */}
             <NewArrivalsSection
               products={products}
-              onViewDetails={setDetailsProduct}
+              isLoading={isLoadingProducts}
+              onViewDetails={handleOpenProductDetails}
               onOrderWhatsApp={handleOpenWhatsAppOrder}
               onAddToCart={handleAddToCart}
               onViewAll={handleShopNow}
@@ -263,14 +503,17 @@ export default function App() {
         {activePage === 'shop' && (
           <ProductGrid
             products={products}
+            isLoading={isLoadingProducts}
+            fetchError={productsFetchError}
+            onRetry={handleRetryFetch}
             selectedCategory={selectedCategory}
             onSelectCategory={setSelectedCategory}
             searchQuery={searchQuery}
             setSearchQuery={setSearchQuery}
-            onViewDetails={setDetailsProduct}
+            onViewDetails={handleOpenProductDetails}
             onOrderWhatsApp={handleOpenWhatsAppOrder}
             onAddToCart={handleAddToCart}
-            onOpenAdmin={() => setIsAdminOpen(true)}
+            onOpenAdmin={isAdmin ? () => setIsAdminOpen(true) : undefined}
           />
         )}
 
@@ -308,22 +551,83 @@ export default function App() {
       {/* 4. Global Luxury Footer */}
       <Footer
         onSelectCategory={handleSelectCategory}
-        onNavigate={setActivePage}
+        setActivePage={setActivePage}
         onOpenAdmin={() => setIsAdminOpen(true)}
       />
 
       {/* 5. Modals and Slide-overs */}
-      {/* Product Details Modal */}
+      {/* Product Details Modal with Video, Reviews, Link Sharing */}
       <ProductDetailsModal
         product={detailsProduct}
         isOpen={Boolean(detailsProduct)}
-        onClose={() => setDetailsProduct(null)}
+        onClose={handleCloseProductDetails}
         onAddToCart={handleAddToCart}
         onOrderWhatsApp={(prod) => {
-          setDetailsProduct(null);
+          handleCloseProductDetails();
           setWhatsAppModalProduct(prod);
         }}
+        onAddReview={handleAddReview}
       />
+
+      {/* Loading overlay for direct product link */}
+      {isLoadingDirectProduct && !detailsProduct && !productNotFoundId && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-stone-950/40 backdrop-blur-xs animate-in fade-in duration-150">
+          <div className="bg-white rounded-2xl p-6 shadow-2xl flex items-center gap-3 border border-stone-200">
+            <div className="w-5 h-5 border-2 border-amber-700 border-t-transparent rounded-full animate-spin" />
+            <span className="text-xs sm:text-sm font-semibold text-stone-800">
+              Loading Product Details...
+            </span>
+          </div>
+        </div>
+      )}
+
+      {/* Product Not Found Modal for removed or invalid product URLs */}
+      {productNotFoundId && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-stone-950/70 backdrop-blur-xs animate-in fade-in duration-200">
+          <div className="bg-white rounded-2xl max-w-md w-full p-6 sm:p-8 text-center shadow-2xl border border-stone-200 relative animate-in zoom-in-95 duration-200">
+            <button
+              type="button"
+              onClick={handleCloseProductDetails}
+              className="absolute top-4 right-4 text-stone-400 hover:text-stone-700 p-1.5 rounded-full hover:bg-stone-100 transition-colors"
+              aria-label="Close"
+            >
+              <X className="w-5 h-5" />
+            </button>
+
+            <div className="w-14 h-14 bg-amber-50 border border-amber-200 rounded-full flex items-center justify-center mx-auto mb-4 text-amber-800">
+              <AlertCircle className="w-7 h-7" />
+            </div>
+
+            <h3 className="font-serif text-xl sm:text-2xl font-bold text-stone-900 mb-2">
+              Product Not Found
+            </h3>
+
+            <p className="text-xs sm:text-sm text-stone-600 mb-6 leading-relaxed">
+              The product you are looking for (<span className="font-mono font-semibold text-stone-800">{productNotFoundId}</span>) is not available or has been removed from our collection.
+            </p>
+
+            <div className="flex flex-col sm:flex-row gap-3">
+              <button
+                type="button"
+                onClick={() => {
+                  handleCloseProductDetails();
+                  handleShopNow();
+                }}
+                className="flex-1 bg-amber-700 hover:bg-amber-800 text-white font-semibold py-3 px-5 rounded-xl text-xs sm:text-sm transition-all shadow-md hover:shadow-lg"
+              >
+                Browse All Products
+              </button>
+              <button
+                type="button"
+                onClick={handleCloseProductDetails}
+                className="sm:w-auto bg-stone-100 hover:bg-stone-200 text-stone-700 font-semibold py-3 px-5 rounded-xl text-xs sm:text-sm transition-colors"
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* WhatsApp Quick Order & Address Modal */}
       <WhatsAppOrderModal
@@ -346,15 +650,17 @@ export default function App() {
         }}
       />
 
-      {/* Admin Dashboard */}
+      {/* Simple Admin Product Management Panel */}
       {isAdminOpen && (
         <AdminDashboard
           products={products}
           onSaveProduct={handleSaveProduct}
           onDeleteProduct={handleDeleteProduct}
-          onDeleteMultipleProducts={handleDeleteMultipleProducts}
-          onImportProducts={handleImportProducts}
-          onClose={() => setIsAdminOpen(false)}
+          onClose={() => {
+            setIsAdminOpen(false);
+            setAdminInitialOpenAdd(false);
+          }}
+          initialOpenAdd={adminInitialOpenAdd}
         />
       )}
 

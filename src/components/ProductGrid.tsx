@@ -1,11 +1,25 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import { Product, CategoryName } from '../types';
-import { CATEGORIES } from '../data/categories';
+import { CATEGORIES, normalizeCategoryName } from '../data/categories';
 import { ProductCard } from './ProductCard';
-import { Search, SlidersHorizontal, ArrowUpDown, X, Sparkles, Filter, PackageOpen } from 'lucide-react';
+import { 
+  Search, 
+  SlidersHorizontal, 
+  ArrowUpDown, 
+  X, 
+  Sparkles, 
+  Filter, 
+  PackageOpen, 
+  Loader2, 
+  AlertCircle, 
+  RefreshCw 
+} from 'lucide-react';
 
 interface ProductGridProps {
   products: Product[];
+  isLoading?: boolean;
+  fetchError?: string | null;
+  onRetry?: () => void;
   selectedCategory: CategoryName | null;
   onSelectCategory: (cat: CategoryName | null) => void;
   searchQuery: string;
@@ -20,6 +34,9 @@ type SortOption = 'featured' | 'newest' | 'price-asc' | 'price-desc';
 
 export const ProductGrid: React.FC<ProductGridProps> = ({
   products,
+  isLoading = false,
+  fetchError = null,
+  onRetry,
   selectedCategory,
   onSelectCategory,
   searchQuery,
@@ -30,22 +47,33 @@ export const ProductGrid: React.FC<ProductGridProps> = ({
   onOpenAdmin,
 }) => {
   const [sortBy, setSortBy] = useState<SortOption>('featured');
-  const [maxPriceFilter, setMaxPriceFilter] = useState<number>(50000);
+  const [maxPriceFilter, setMaxPriceFilter] = useState<number>(100000);
   const [inStockOnly, setInStockOnly] = useState<boolean>(false);
   const [showFiltersMobile, setShowFiltersMobile] = useState<boolean>(false);
 
   // Highest price calculation for price slider
   const highestPrice = useMemo(() => {
     if (products.length === 0) return 20000;
-    return Math.max(...products.map(p => p.salePrice || p.price || 0), 10000);
+    return Math.max(...products.map(p => Number(p.salePrice) || Number(p.price) || 0), 10000);
   }, [products]);
+
+  // Adjust max price if products exceed default
+  useEffect(() => {
+    if (highestPrice > maxPriceFilter) {
+      setMaxPriceFilter(highestPrice);
+    }
+  }, [highestPrice]);
 
   // Filter and sort products
   const filteredProducts = useMemo(() => {
     return products.filter((p) => {
-      // Category filter
-      if (selectedCategory && p.category !== selectedCategory) {
-        return false;
+      // Category filter - robust normalized comparison
+      if (selectedCategory) {
+        const pCat = normalizeCategoryName(p.category);
+        const selCat = normalizeCategoryName(selectedCategory);
+        if (pCat !== selCat && p.category !== selectedCategory) {
+          return false;
+        }
       }
 
       // Search query filter (name, category, description, sku, id)
@@ -64,25 +92,30 @@ export const ProductGrid: React.FC<ProductGridProps> = ({
       }
 
       // Max price filter
-      if (p.salePrice > maxPriceFilter) {
+      const pSalePrice = Number(p.salePrice) || Number(p.price) || 0;
+      if (pSalePrice > maxPriceFilter) {
         return false;
       }
 
       // In stock only filter
-      if (inStockOnly && (p.stock <= 0 || p.status === 'out_of_stock')) {
+      const pStock = Number(p.stock) || 0;
+      if (inStockOnly && (pStock <= 0 || p.status === 'out_of_stock')) {
         return false;
       }
 
       return true;
     }).sort((a, b) => {
+      const aSalePrice = Number(a.salePrice) || Number(a.price) || 0;
+      const bSalePrice = Number(b.salePrice) || Number(b.price) || 0;
+
       if (sortBy === 'newest') {
         return (b.newArrival ? 1 : 0) - (a.newArrival ? 1 : 0);
       }
       if (sortBy === 'price-asc') {
-        return a.salePrice - b.salePrice;
+        return aSalePrice - bSalePrice;
       }
       if (sortBy === 'price-desc') {
-        return b.salePrice - a.salePrice;
+        return bSalePrice - aSalePrice;
       }
       // 'featured'
       if (a.featured && !b.featured) return -1;
@@ -94,7 +127,7 @@ export const ProductGrid: React.FC<ProductGridProps> = ({
   const resetAllFilters = () => {
     onSelectCategory(null);
     setSearchQuery('');
-    setMaxPriceFilter(highestPrice);
+    setMaxPriceFilter(Math.max(highestPrice, 10000));
     setInStockOnly(false);
     setSortBy('featured');
   };
@@ -250,7 +283,7 @@ export const ProductGrid: React.FC<ProductGridProps> = ({
                   </button>
 
                   {CATEGORIES.map((cat) => {
-                    const count = products.filter(p => p.category === cat.name).length;
+                    const count = products.filter(p => normalizeCategoryName(p.category) === cat.name || p.category === cat.name).length;
                     const isSelected = selectedCategory === cat.name;
 
                     return (
@@ -278,8 +311,37 @@ export const ProductGrid: React.FC<ProductGridProps> = ({
 
           {/* Right Product Grid */}
           <div className="lg:col-span-3">
-            {products.length === 0 ? (
-              /* Requirement 1: If there are no imported products, show "No products available yet." */
+            {isLoading && products.length === 0 ? (
+              <div className="text-center py-20 px-6 bg-white rounded-3xl border border-stone-200/90 shadow-2xs space-y-4">
+                <Loader2 className="w-10 h-10 text-amber-700 animate-spin mx-auto" />
+                <h3 className="font-serif text-xl font-bold text-stone-900">
+                  Loading Products from Database...
+                </h3>
+                <p className="text-xs text-stone-500 max-w-sm mx-auto">
+                  Connecting to shared cloud storage to fetch the live inventory.
+                </p>
+              </div>
+            ) : fetchError && products.length === 0 ? (
+              <div className="text-center py-16 px-6 bg-white rounded-3xl border border-red-200 shadow-2xs space-y-4">
+                <AlertCircle className="w-10 h-10 text-red-600 mx-auto" />
+                <h3 className="font-serif text-xl font-bold text-stone-900">
+                  Failed to Load Products
+                </h3>
+                <p className="text-xs text-stone-600 max-w-md mx-auto">
+                  {fetchError}
+                </p>
+                {onRetry && (
+                  <button
+                    onClick={onRetry}
+                    className="inline-flex items-center gap-1.5 bg-[#181816] hover:bg-stone-800 text-white text-xs font-semibold py-2.5 px-5 rounded-xl transition-all shadow-xs"
+                  >
+                    <RefreshCw className="w-3.5 h-3.5" />
+                    <span>Retry Connection</span>
+                  </button>
+                )}
+              </div>
+            ) : products.length === 0 ? (
+              /* If there are no products, show friendly empty state */
               <div className="text-center py-20 px-6 bg-white rounded-3xl border border-stone-200/90 shadow-2xs space-y-5">
                 <div className="w-20 h-20 rounded-full bg-amber-50 text-amber-800 flex items-center justify-center mx-auto">
                   <PackageOpen className="w-10 h-10 stroke-1" />
@@ -289,7 +351,7 @@ export const ProductGrid: React.FC<ProductGridProps> = ({
                     No products available yet.
                   </h3>
                   <p className="text-xs sm:text-sm text-stone-500 mt-2 max-w-md mx-auto">
-                    Please use the Admin Portal to bulk-import your product catalogue via CSV or Excel, or add individual items.
+                    New items are arriving soon. Please check back shortly or browse our other collections.
                   </p>
                 </div>
                 {onOpenAdmin && (
@@ -298,7 +360,7 @@ export const ProductGrid: React.FC<ProductGridProps> = ({
                       onClick={onOpenAdmin}
                       className="bg-[#181816] hover:bg-stone-800 text-[#FAF9F5] text-xs font-semibold py-3 px-6 rounded-xl transition-all shadow-xs"
                     >
-                      Open Admin Portal & Import Products
+                      Open Admin Portal & Add Products
                     </button>
                   </div>
                 )}

@@ -1,10 +1,13 @@
 import React from 'react';
 import { Product } from '../types';
 import { ProductCard } from './ProductCard';
-import { Sparkles, Flame, ArrowRight, PackageOpen } from 'lucide-react';
+import { Sparkles, Flame, ArrowRight, PackageOpen, Loader2, AlertCircle, RefreshCw } from 'lucide-react';
 
 interface SectionProps {
   products: Product[];
+  isLoading?: boolean;
+  error?: string | null;
+  onRetry?: () => void;
   onViewDetails: (product: Product) => void;
   onOrderWhatsApp: (product: Product) => void;
   onAddToCart: (product: Product) => void;
@@ -13,14 +16,49 @@ interface SectionProps {
 
 export const FeaturedProducts: React.FC<SectionProps> = ({
   products,
+  isLoading = false,
+  error = null,
+  onRetry,
   onViewDetails,
   onOrderWhatsApp,
   onAddToCart,
   onViewAll,
 }) => {
-  const featured = products.filter(p => p.featured).slice(0, 4);
+  // Loading state
+  if (isLoading && products.length === 0) {
+    return (
+      <section className="py-12 lg:py-16 bg-[#FAF9F5] border-b border-stone-200/60">
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 text-center py-12 bg-white rounded-3xl border border-stone-200 shadow-2xs space-y-3">
+          <Loader2 className="w-8 h-8 text-amber-700 animate-spin mx-auto" />
+          <p className="text-sm font-medium text-stone-700">Loading live products from database...</p>
+        </div>
+      </section>
+    );
+  }
 
-  // If no products exist overall, show subtle placeholder or return null
+  // Error state
+  if (error && products.length === 0) {
+    return (
+      <section className="py-12 lg:py-16 bg-[#FAF9F5] border-b border-stone-200/60">
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 text-center py-10 bg-white rounded-3xl border border-red-200 shadow-2xs space-y-3">
+          <AlertCircle className="w-8 h-8 text-red-600 mx-auto" />
+          <h3 className="font-serif text-lg font-bold text-stone-900">Database Connection Notice</h3>
+          <p className="text-xs text-stone-600 max-w-md mx-auto">{error}</p>
+          {onRetry && (
+            <button
+              onClick={onRetry}
+              className="inline-flex items-center gap-1.5 text-xs font-semibold bg-stone-900 text-white px-4 py-2 rounded-xl hover:bg-stone-800 transition-colors"
+            >
+              <RefreshCw className="w-3.5 h-3.5" />
+              <span>Retry Fetching</span>
+            </button>
+          )}
+        </div>
+      </section>
+    );
+  }
+
+  // If no products exist overall
   if (products.length === 0) {
     return (
       <section className="py-12 lg:py-16 bg-[#FAF9F5] border-b border-stone-200/60">
@@ -39,7 +77,10 @@ export const FeaturedProducts: React.FC<SectionProps> = ({
     );
   }
 
-  if (featured.length === 0) return null;
+  const explicitFeatured = products.filter(p => p.featured);
+  const displayProducts = explicitFeatured.length > 0 
+    ? explicitFeatured.slice(0, 4) 
+    : products.slice(0, 4);
 
   return (
     <section className="py-12 lg:py-16 bg-[#FAF9F5]">
@@ -61,7 +102,7 @@ export const FeaturedProducts: React.FC<SectionProps> = ({
 
           <button
             onClick={onViewAll}
-            className="inline-flex items-center gap-1.5 text-xs sm:text-sm font-bold text-stone-900 hover:text-amber-700 transition-colors group"
+            className="inline-flex items-center gap-1.5 text-xs sm:text-sm font-bold text-stone-900 hover:text-amber-700 transition-colors group cursor-pointer"
           >
             <span>View All Products</span>
             <ArrowRight className="w-4 h-4 group-hover:translate-x-1 transition-transform" />
@@ -69,7 +110,7 @@ export const FeaturedProducts: React.FC<SectionProps> = ({
         </div>
 
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6">
-          {featured.map((product) => (
+          {displayProducts.map((product) => (
             <ProductCard
               key={product.id}
               product={product}
@@ -87,14 +128,19 @@ export const FeaturedProducts: React.FC<SectionProps> = ({
 
 export const NewArrivalsSection: React.FC<SectionProps> = ({
   products,
+  isLoading = false,
   onViewDetails,
   onOrderWhatsApp,
   onAddToCart,
   onViewAll,
 }) => {
-  const newItems = products.filter(p => p.newArrival).slice(0, 4);
+  if (isLoading && products.length === 0) return null;
+  if (products.length === 0) return null;
 
-  if (newItems.length === 0) return null;
+  const explicitNew = products.filter(p => p.newArrival);
+  const displayItems = explicitNew.length > 0 
+    ? explicitNew.slice(0, 4) 
+    : products.slice(0, 4);
 
   return (
     <section className="py-12 lg:py-16 bg-white border-t border-stone-200/80">
@@ -116,7 +162,7 @@ export const NewArrivalsSection: React.FC<SectionProps> = ({
 
           <button
             onClick={onViewAll}
-            className="inline-flex items-center gap-1.5 text-xs sm:text-sm font-bold text-stone-900 hover:text-amber-700 transition-colors group"
+            className="inline-flex items-center gap-1.5 text-xs sm:text-sm font-bold text-stone-900 hover:text-amber-700 transition-colors group cursor-pointer"
           >
             <span>Browse All New Items</span>
             <ArrowRight className="w-4 h-4 group-hover:translate-x-1 transition-transform" />
@@ -124,7 +170,7 @@ export const NewArrivalsSection: React.FC<SectionProps> = ({
         </div>
 
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6">
-          {newItems.map((product) => (
+          {displayItems.map((product) => (
             <ProductCard
               key={product.id}
               product={product}

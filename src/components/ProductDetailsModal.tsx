@@ -1,24 +1,31 @@
-import React, { useState, useEffect } from 'react';
-import { Product } from '../types';
+import React, { useState, useEffect, useRef } from 'react';
+import { Product, ReviewItem } from '../types';
 import { 
   X, 
   MessageCircle, 
   ShoppingBag, 
   Truck, 
   Banknote, 
-  ShieldCheck, 
   Star, 
   Check, 
-  AlertCircle
+  Share2, 
+  Video, 
+  Layers, 
+  Palette,
+  MessageSquare,
+  Copy,
+  Send
 } from 'lucide-react';
 import { SafeProductImage } from './SafeProductImage';
+import { getProductShareUrl } from '../services/productService';
 
 interface ProductDetailsModalProps {
   product: Product | null;
   isOpen: boolean;
   onClose: () => void;
-  onAddToCart: (product: Product, quantity: number) => void;
-  onOrderWhatsApp: (product: Product, quantity: number) => void;
+  onAddToCart: (product: Product, quantity: number, selectedSize?: string, selectedColor?: string) => void;
+  onOrderWhatsApp: (product: Product, quantity: number, selectedSize?: string, selectedColor?: string) => void;
+  onAddReview?: (productId: string, review: ReviewItem) => void;
 }
 
 export const ProductDetailsModal: React.FC<ProductDetailsModalProps> = ({
@@ -27,103 +34,222 @@ export const ProductDetailsModal: React.FC<ProductDetailsModalProps> = ({
   onClose,
   onAddToCart,
   onOrderWhatsApp,
+  onAddReview,
 }) => {
+  const [selectedMedia, setSelectedMedia] = useState<'image' | 'video'>('image');
   const [selectedImage, setSelectedImage] = useState<string>('');
+  const [selectedSize, setSelectedSize] = useState<string>('');
+  const [selectedColor, setSelectedColor] = useState<string>('');
   const [quantity, setQuantity] = useState(1);
   const [addedToast, setAddedToast] = useState(false);
+  const [copiedLink, setCopiedLink] = useState(false);
+
+  // Review submission state
+  const [newReviewAuthor, setNewReviewAuthor] = useState('');
+  const [newReviewRating, setNewReviewRating] = useState(5);
+  const [newReviewComment, setNewReviewComment] = useState('');
+  const [reviewSubmittedToast, setReviewSubmittedToast] = useState(false);
+
+  const videoRef = useRef<HTMLVideoElement>(null);
 
   useEffect(() => {
     if (product) {
+      setSelectedMedia('image');
       setSelectedImage(product.image);
+      setSelectedSize(product.sizes && product.sizes.length > 0 ? product.sizes[0] : '');
+      setSelectedColor(product.colors && product.colors.length > 0 ? product.colors[0] : '');
       setQuantity(1);
       setAddedToast(false);
+      setCopiedLink(false);
+      setReviewSubmittedToast(false);
     }
   }, [product]);
 
   if (!isOpen || !product) return null;
 
-  const allImages = product.images && product.images.length > 0 
+  const allImages = Array.isArray(product.images) && product.images.length > 0 
     ? product.images 
-    : [product.image];
+    : [product.image || ''];
 
-  const isOutOfStock = product.stock <= 0 || product.status === 'out_of_stock';
-  const isLowStock = !isOutOfStock && (product.stock <= 5 || product.status === 'low_stock');
-  const discountPercent = product.discountPercent ?? (
-    product.price > product.salePrice
-      ? Math.round(((product.price - product.salePrice) / product.price) * 100)
-      : 0
-  );
+  const stock = Number(product.stock) || 0;
+  const isOutOfStock = stock <= 0 || product.status === 'out_of_stock';
+  const isLowStock = !isOutOfStock && (stock <= 5 || product.status === 'low_stock');
+  const price = Number(product.price) || 0;
+  const salePrice = Number(product.salePrice) || price;
+  const discountPercent = typeof product.discountPercent === 'number'
+    ? product.discountPercent
+    : (price > salePrice && price > 0 ? Math.round(((price - salePrice) / price) * 100) : 0);
+
+  const productReviews = product.reviews || [];
+  const reviewsCount = productReviews.length > 0 ? productReviews.length : (product.reviewsCount ?? 1);
+  const ratingValue = Number(product.rating ?? 5.0).toFixed(1);
 
   const handleAdd = () => {
-    onAddToCart(product, quantity);
+    onAddToCart(product, quantity, selectedSize, selectedColor);
     setAddedToast(true);
     setTimeout(() => setAddedToast(false), 2500);
   };
 
+  const handleCopyLink = () => {
+    const url = getProductShareUrl(product);
+    navigator.clipboard.writeText(url).then(() => {
+      setCopiedLink(true);
+      setTimeout(() => setCopiedLink(false), 2500);
+    }).catch(() => {
+      // Fallback
+      prompt("Copy Product Link:", url);
+    });
+  };
+
+  const handleSubmitReview = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!newReviewAuthor.trim() || !newReviewComment.trim()) return;
+
+    const newRev: ReviewItem = {
+      id: 'rev_' + Date.now(),
+      author: newReviewAuthor.trim(),
+      rating: Number(newReviewRating),
+      comment: newReviewComment.trim(),
+      date: new Date().toISOString().split('T')[0],
+    };
+
+    if (onAddReview) {
+      onAddReview(product.id, newRev);
+    }
+
+    setNewReviewAuthor('');
+    setNewReviewComment('');
+    setReviewSubmittedToast(true);
+    setTimeout(() => setReviewSubmittedToast(false), 3000);
+  };
+
   return (
-    <div className="fixed inset-0 z-50 overflow-y-auto bg-stone-900/60 backdrop-blur-xs flex items-center justify-center p-3 sm:p-6 animate-in fade-in duration-200">
-      <div className="relative bg-[#FAF9F5] border border-stone-300 w-full max-w-4xl rounded-2xl sm:rounded-3xl shadow-2xl overflow-hidden my-6">
+    <div className="fixed inset-0 z-50 overflow-y-auto bg-stone-900/65 backdrop-blur-xs flex items-center justify-center p-2 sm:p-4 md:p-6 animate-in fade-in duration-200">
+      <div className="relative bg-[#FAF9F5] border border-stone-300 w-full max-w-4xl rounded-2xl sm:rounded-3xl shadow-2xl overflow-hidden my-4">
         
         {/* Close Button Top Right */}
         <button
           onClick={onClose}
-          className="absolute top-3.5 right-3.5 z-20 p-2 text-stone-500 hover:text-stone-900 bg-white/80 hover:bg-white rounded-full shadow-sm transition-all focus:outline-none"
+          className="absolute top-3 right-3 z-30 p-2 text-stone-500 hover:text-stone-900 bg-white/90 hover:bg-white rounded-full shadow-md transition-all focus:outline-none"
           aria-label="Close modal"
         >
           <X className="w-5 h-5" />
         </button>
 
         <div className="grid grid-cols-1 md:grid-cols-2 max-h-[90vh] overflow-y-auto">
-          {/* Left Column: Product Gallery */}
-          <div className="p-6 bg-[#F5F2EA] flex flex-col justify-between border-b md:border-b-0 md:border-r border-stone-200">
+          {/* Left Column: Product Gallery & Media */}
+          <div className="p-5 sm:p-6 bg-[#F5F2EA] flex flex-col justify-between border-b md:border-b-0 md:border-r border-stone-200">
             <div>
-              {/* Main Image */}
+              {/* Media Switching Tabs (Images vs Video) */}
+              {product.video && (
+                <div className="flex items-center gap-2 mb-3">
+                  <button
+                    type="button"
+                    onClick={() => setSelectedMedia('image')}
+                    className={`text-xs font-semibold px-3 py-1.5 rounded-lg transition-all flex items-center gap-1.5 ${
+                      selectedMedia === 'image'
+                        ? 'bg-stone-900 text-white shadow-xs'
+                        : 'bg-white/80 text-stone-600 hover:bg-white'
+                    }`}
+                  >
+                    <span>Photos ({allImages.length})</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setSelectedMedia('video')}
+                    className={`text-xs font-semibold px-3 py-1.5 rounded-lg transition-all flex items-center gap-1.5 ${
+                      selectedMedia === 'video'
+                        ? 'bg-stone-900 text-white shadow-xs'
+                        : 'bg-white/80 text-stone-600 hover:bg-white'
+                    }`}
+                  >
+                    <Video className="w-3.5 h-3.5 text-amber-500" />
+                    <span>Watch Video</span>
+                  </button>
+                </div>
+              )}
+
+              {/* Main Media Viewport */}
               <div className="w-full aspect-square rounded-2xl overflow-hidden border border-stone-300/80 bg-white relative shadow-inner">
-                <SafeProductImage
-                  src={selectedImage || product.image}
-                  alt={product.name}
-                  className="w-full h-full object-cover object-center"
-                />
+                {selectedMedia === 'video' && product.video ? (
+                  <div className="w-full h-full bg-black flex items-center justify-center relative">
+                    <video
+                      ref={videoRef}
+                      src={product.video}
+                      controls
+                      controlsList="nodownload nofullscreen noremoteplayback"
+                      disablePictureInPicture
+                      onContextMenu={(e) => e.preventDefault()}
+                      className="w-full h-full object-contain"
+                      playsInline
+                    />
+                  </div>
+                ) : (
+                  <>
+                    <SafeProductImage
+                      src={selectedImage || product.image}
+                      alt={product.name}
+                      className="w-full h-full object-cover object-center"
+                    />
 
-                {discountPercent > 0 && (
-                  <span className="absolute top-3 left-3 bg-amber-700 text-white text-xs font-bold px-2.5 py-1 rounded-md shadow-xs">
-                    {discountPercent}% OFF
-                  </span>
-                )}
+                    {discountPercent > 0 && (
+                      <span className="absolute top-3 left-3 bg-amber-700 text-white text-xs font-bold px-2.5 py-1 rounded-md shadow-xs">
+                        {discountPercent}% OFF
+                      </span>
+                    )}
 
-                {product.newArrival && (
-                  <span className="absolute top-3 right-3 bg-stone-900 text-white text-xs font-bold px-2.5 py-1 rounded-md shadow-xs">
-                    NEW ARRIVAL
-                  </span>
+                    {product.newArrival && (
+                      <span className="absolute top-3 right-3 bg-stone-900 text-white text-xs font-bold px-2.5 py-1 rounded-md shadow-xs">
+                        NEW ARRIVAL
+                      </span>
+                    )}
+                  </>
                 )}
               </div>
 
-              {/* Thumbnails if multiple images */}
-              {allImages.length > 1 && (
-                <div className="flex items-center gap-2 mt-4 overflow-x-auto pb-2">
-                  {allImages.map((img, idx) => (
-                    <button
-                      key={idx}
-                      onClick={() => setSelectedImage(img)}
-                      className={`relative w-16 h-16 rounded-xl overflow-hidden shrink-0 border-2 transition-all ${
-                        selectedImage === img
-                          ? 'border-amber-700 ring-2 ring-amber-700/20 scale-102'
-                          : 'border-stone-300 opacity-70 hover:opacity-100'
-                      }`}
-                    >
-                      <SafeProductImage
-                        src={img}
-                        alt={`${product.name} preview ${idx + 1}`}
-                        className="w-full h-full object-cover"
-                      />
-                    </button>
-                  ))}
-                </div>
-              )}
+              {/* Thumbnails Row */}
+              <div className="flex items-center gap-2 mt-3 overflow-x-auto pb-2 scrollbar-thin">
+                {allImages.map((img, idx) => (
+                  <button
+                    key={idx}
+                    type="button"
+                    onClick={() => {
+                      setSelectedMedia('image');
+                      setSelectedImage(img);
+                    }}
+                    className={`relative w-14 h-14 rounded-xl overflow-hidden shrink-0 border-2 transition-all ${
+                      selectedMedia === 'image' && selectedImage === img
+                        ? 'border-amber-700 ring-2 ring-amber-700/20 scale-102 shadow-xs'
+                        : 'border-stone-300 opacity-70 hover:opacity-100 bg-white'
+                    }`}
+                  >
+                    <SafeProductImage
+                      src={img}
+                      alt={`${product.name} thumbnail ${idx + 1}`}
+                      className="w-full h-full object-cover"
+                    />
+                  </button>
+                ))}
+
+                {product.video && (
+                  <button
+                    type="button"
+                    onClick={() => setSelectedMedia('video')}
+                    className={`relative w-14 h-14 rounded-xl overflow-hidden shrink-0 border-2 transition-all flex flex-col items-center justify-center bg-stone-900 text-white ${
+                      selectedMedia === 'video'
+                        ? 'border-amber-500 ring-2 ring-amber-500/20 scale-102'
+                        : 'border-stone-400 opacity-80 hover:opacity-100'
+                    }`}
+                  >
+                    <Video className="w-5 h-5 text-amber-400" />
+                    <span className="text-[9px] font-bold mt-0.5">Video</span>
+                  </button>
+                )}
+              </div>
             </div>
 
-            {/* Quick Guarantees Pill */}
-            <div className="mt-6 pt-4 border-t border-stone-300/60 grid grid-cols-2 gap-3 text-xs text-stone-600">
+            {/* Quick Benefits Guarantees */}
+            <div className="mt-4 pt-4 border-t border-stone-300/60 grid grid-cols-2 gap-3 text-xs text-stone-600">
               <div className="flex items-center gap-2">
                 <Truck className="w-4 h-4 text-amber-700 shrink-0" />
                 <span>Free Delivery in Pakistan</span>
@@ -135,103 +261,252 @@ export const ProductDetailsModal: React.FC<ProductDetailsModalProps> = ({
             </div>
           </div>
 
-          {/* Right Column: Details & Actions */}
-          <div className="p-6 sm:p-8 flex flex-col justify-between">
+          {/* Right Column: Details, Options, & Actions */}
+          <div className="p-5 sm:p-7 flex flex-col justify-between">
             <div className="space-y-4">
-              {/* Category & Status & SKU */}
+              {/* Category, Status & Share */}
               <div className="flex items-center justify-between flex-wrap gap-2 text-xs">
                 <span className="font-bold tracking-widest text-amber-800 uppercase bg-amber-50 px-2.5 py-1 rounded-md border border-amber-200">
                   {product.category}
                 </span>
 
                 <div className="flex items-center gap-2">
-                  {product.sku && (
-                    <span className="text-stone-400 font-mono text-[11px]">
-                      SKU: {product.sku}
-                    </span>
-                  )}
+                  <button
+                    type="button"
+                    onClick={handleCopyLink}
+                    className="inline-flex items-center gap-1 bg-white hover:bg-stone-100 border border-stone-300 text-stone-700 px-2.5 py-1 rounded-md transition-colors text-[11px] font-semibold shadow-2xs"
+                    title="Copy shareable product link"
+                  >
+                    {copiedLink ? (
+                      <>
+                        <Check className="w-3.5 h-3.5 text-emerald-600" />
+                        <span className="text-emerald-700 font-bold">Link Copied!</span>
+                      </>
+                    ) : (
+                      <>
+                        <Share2 className="w-3.5 h-3.5 text-stone-600" />
+                        <span>Copy Link</span>
+                      </>
+                    )}
+                  </button>
+
                   {isOutOfStock ? (
                     <span className="text-red-700 font-bold bg-red-50 px-2 py-0.5 rounded border border-red-200">
                       Out of Stock
                     </span>
                   ) : isLowStock ? (
                     <span className="text-amber-800 font-bold bg-amber-50 px-2 py-0.5 rounded border border-amber-200">
-                      Only {product.stock} items left
+                      Only {product.stock} left
                     </span>
                   ) : (
                     <span className="text-emerald-700 font-bold bg-emerald-50 px-2 py-0.5 rounded border border-emerald-200">
-                      In Stock ({product.stock} units)
+                      In Stock ({product.stock})
                     </span>
                   )}
                 </div>
               </div>
 
-              {/* Title */}
+              {/* Product Title */}
               <h1 className="font-serif text-2xl sm:text-3xl font-bold text-stone-900 leading-snug">
                 {product.name}
               </h1>
 
-              {/* Rating */}
+              {/* Rating and Reviews Summary */}
               <div className="flex items-center gap-2 text-xs">
                 <div className="flex items-center text-amber-500">
                   {[...Array(5)].map((_, i) => (
                     <Star key={i} className="w-3.5 h-3.5 fill-current" />
                   ))}
                 </div>
-                <span className="font-bold text-stone-700">{product.rating ?? 5.0}</span>
-                <span className="text-stone-400">({product.reviewsCount ?? 1} customer reviews)</span>
-                <span className="text-stone-300">|</span>
-                <span className="text-stone-500">ID: <span className="font-mono text-stone-700">{product.id}</span></span>
+                <span className="font-bold text-stone-800">{ratingValue}</span>
+                <span className="text-stone-500">({reviewsCount} customer reviews)</span>
+                {product.sku && (
+                  <>
+                    <span className="text-stone-300">|</span>
+                    <span className="text-stone-500 font-mono text-[11px]">SKU: {product.sku}</span>
+                  </>
+                )}
               </div>
 
               {/* Price Banner */}
-              <div className="p-4 bg-stone-100 rounded-2xl border border-stone-200/90 flex items-baseline justify-between">
+              <div className="p-4 bg-stone-100 rounded-2xl border border-stone-200 flex items-baseline justify-between">
                 <div>
-                  <span className="text-xs text-stone-500 block">Current Special Price:</span>
-                  <div className="flex items-baseline gap-3">
+                  <span className="text-[11px] text-stone-500 block uppercase tracking-wider font-semibold">
+                    Special Offer Price
+                  </span>
+                  <div className="flex items-baseline gap-3 mt-0.5">
                     <span className="font-serif text-3xl font-bold text-stone-950">
-                      Rs. {product.salePrice.toLocaleString()}
+                      Rs. {salePrice.toLocaleString()}
                     </span>
-                    {product.price > product.salePrice && (
+                    {price > salePrice && (
                       <span className="text-sm text-stone-400 line-through">
-                        Rs. {product.price.toLocaleString()}
+                        Rs. {price.toLocaleString()}
                       </span>
                     )}
                   </div>
                 </div>
 
                 <div className="text-right">
-                  <span className="text-[11px] font-bold text-emerald-800 bg-emerald-100 px-2.5 py-1 rounded-full uppercase tracking-wider block">
+                  <span className="text-[10px] font-bold text-emerald-800 bg-emerald-100 px-2.5 py-1 rounded-full uppercase tracking-wider block">
                     Zero Delivery Fee
                   </span>
                 </div>
               </div>
 
+              {/* Optional Sizes Selector */}
+              {product.sizes && product.sizes.length > 0 && (
+                <div className="space-y-1.5 pt-1">
+                  <div className="flex items-center justify-between text-xs font-bold text-stone-800">
+                    <span className="flex items-center gap-1.5">
+                      <Layers className="w-3.5 h-3.5 text-amber-700" />
+                      <span>Select Size:</span>
+                    </span>
+                    <span className="text-amber-800 font-semibold">{selectedSize}</span>
+                  </div>
+                  <div className="flex items-center gap-2 flex-wrap">
+                    {product.sizes.map((size) => (
+                      <button
+                        key={size}
+                        type="button"
+                        onClick={() => setSelectedSize(size)}
+                        className={`py-1.5 px-3 rounded-lg text-xs font-semibold border transition-all ${
+                          selectedSize === size
+                            ? 'bg-stone-900 text-white border-stone-900 shadow-xs'
+                            : 'bg-white text-stone-700 border-stone-300 hover:border-stone-400'
+                        }`}
+                      >
+                        {size}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* Optional Colors Selector */}
+              {product.colors && product.colors.length > 0 && (
+                <div className="space-y-1.5 pt-1">
+                  <div className="flex items-center justify-between text-xs font-bold text-stone-800">
+                    <span className="flex items-center gap-1.5">
+                      <Palette className="w-3.5 h-3.5 text-amber-700" />
+                      <span>Select Color:</span>
+                    </span>
+                    <span className="text-amber-800 font-semibold">{selectedColor}</span>
+                  </div>
+                  <div className="flex items-center gap-2 flex-wrap">
+                    {product.colors.map((col) => (
+                      <button
+                        key={col}
+                        type="button"
+                        onClick={() => setSelectedColor(col)}
+                        className={`py-1.5 px-3 rounded-lg text-xs font-semibold border transition-all ${
+                          selectedColor === col
+                            ? 'bg-amber-800 text-white border-amber-800 shadow-xs'
+                            : 'bg-white text-stone-700 border-stone-300 hover:border-stone-400'
+                        }`}
+                      >
+                        {col}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+
               {/* Description */}
-              <div className="pt-2 text-stone-700 text-xs sm:text-sm leading-relaxed space-y-2">
+              <div className="pt-2 text-stone-700 text-xs sm:text-sm leading-relaxed space-y-1.5">
                 <h3 className="font-bold text-stone-900 text-xs uppercase tracking-wider">
-                  Product Details
+                  Product Description
                 </h3>
                 <p className="whitespace-pre-line text-stone-600">
                   {product.description || product.shortDescription}
                 </p>
               </div>
 
-              {/* Security Points */}
-              <div className="space-y-1.5 pt-2 text-xs text-stone-600 border-t border-stone-200">
-                <div className="flex items-center gap-2">
-                  <Check className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
-                  <span>Cash on Delivery available nationwide in all cities of Pakistan</span>
+              {/* Customer Reviews Section */}
+              <div className="pt-3 border-t border-stone-200">
+                <div className="flex items-center justify-between mb-2">
+                  <h3 className="font-bold text-stone-900 text-xs uppercase tracking-wider flex items-center gap-1.5">
+                    <MessageSquare className="w-3.5 h-3.5 text-amber-700" />
+                    <span>Customer Reviews ({productReviews.length})</span>
+                  </h3>
                 </div>
-                <div className="flex items-center gap-2">
-                  <Check className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
-                  <span>Inspect your parcel safely upon arrival</span>
-                </div>
+
+                {/* List existing reviews */}
+                {productReviews.length > 0 ? (
+                  <div className="space-y-2 max-h-36 overflow-y-auto pr-1">
+                    {productReviews.map((rev) => (
+                      <div key={rev.id} className="bg-white p-2.5 rounded-xl border border-stone-200 text-xs">
+                        <div className="flex items-center justify-between mb-1">
+                          <span className="font-bold text-stone-800">{rev.author}</span>
+                          <div className="flex items-center gap-1 text-amber-500">
+                            {[...Array(rev.rating)].map((_, i) => (
+                              <Star key={i} className="w-3 h-3 fill-current" />
+                            ))}
+                            <span className="text-[10px] text-stone-400 ml-1">{rev.date}</span>
+                          </div>
+                        </div>
+                        <p className="text-stone-600">{rev.comment}</p>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="text-stone-500 text-xs italic bg-white/60 p-2 rounded-lg border border-stone-200/80">
+                    No verified customer reviews yet. Be the first to review this product!
+                  </p>
+                )}
+
+                {/* Submit quick review form */}
+                <form onSubmit={handleSubmitReview} className="mt-3 bg-white p-3 rounded-xl border border-stone-200 space-y-2">
+                  <span className="text-[11px] font-bold text-stone-800 block">Write a Customer Review</span>
+                  <div className="grid grid-cols-2 gap-2">
+                    <input
+                      type="text"
+                      placeholder="Your Name"
+                      value={newReviewAuthor}
+                      onChange={(e) => setNewReviewAuthor(e.target.value)}
+                      required
+                      className="text-xs px-2.5 py-1.5 rounded-lg border border-stone-300 focus:outline-none focus:ring-1 focus:ring-amber-600"
+                    />
+                    <select
+                      value={newReviewRating}
+                      onChange={(e) => setNewReviewRating(Number(e.target.value))}
+                      className="text-xs px-2.5 py-1.5 rounded-lg border border-stone-300 focus:outline-none focus:ring-1 focus:ring-amber-600 bg-white"
+                    >
+                      <option value={5}>⭐⭐⭐⭐⭐ (5 Stars)</option>
+                      <option value={4}>⭐⭐⭐⭐ (4 Stars)</option>
+                      <option value={3}>⭐⭐⭐ (3 Stars)</option>
+                      <option value={2}>⭐⭐ (2 Stars)</option>
+                      <option value={1}>⭐ (1 Star)</option>
+                    </select>
+                  </div>
+                  <div className="flex gap-2">
+                    <input
+                      type="text"
+                      placeholder="Share your honest feedback about quality, delivery..."
+                      value={newReviewComment}
+                      onChange={(e) => setNewReviewComment(e.target.value)}
+                      required
+                      className="flex-1 text-xs px-2.5 py-1.5 rounded-lg border border-stone-300 focus:outline-none focus:ring-1 focus:ring-amber-600"
+                    />
+                    <button
+                      type="submit"
+                      className="bg-stone-900 hover:bg-stone-800 text-white text-xs font-semibold px-3 py-1.5 rounded-lg shrink-0 flex items-center gap-1"
+                    >
+                      <Send className="w-3 h-3" />
+                      <span>Post</span>
+                    </button>
+                  </div>
+                  {reviewSubmittedToast && (
+                    <span className="text-[11px] text-emerald-600 font-semibold block">
+                      ✓ Thank you! Your review was submitted.
+                    </span>
+                  )}
+                </form>
               </div>
+
             </div>
 
             {/* Sticky Action Footer */}
-            <div className="pt-6 mt-6 border-t border-stone-200 space-y-3">
+            <div className="pt-4 mt-4 border-t border-stone-200 space-y-3">
               {/* Quantity selector */}
               <div className="flex items-center justify-between">
                 <span className="text-xs font-bold text-stone-700">Quantity:</span>
@@ -257,9 +532,9 @@ export const ProductDetailsModal: React.FC<ProductDetailsModalProps> = ({
               </div>
 
               {/* Action Buttons */}
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-2">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-1">
                 <button
-                  onClick={() => onOrderWhatsApp(product, quantity)}
+                  onClick={() => onOrderWhatsApp(product, quantity, selectedSize, selectedColor)}
                   className="w-full flex items-center justify-center gap-2 bg-emerald-600 hover:bg-emerald-700 text-white font-bold py-3 px-4 rounded-xl text-xs sm:text-sm shadow-md transition-all active:scale-98"
                 >
                   <MessageCircle className="w-4 h-4 fill-white" />
@@ -291,8 +566,8 @@ export const ProductDetailsModal: React.FC<ProductDetailsModalProps> = ({
                 </button>
               </div>
 
-              <p className="text-[11px] text-center text-stone-400">
-                Direct WhatsApp booking available 24/7 with zero advance payment.
+              <p className="text-[11px] text-center text-stone-500">
+                Nationwide Free Delivery • Inspect Parcel on Arrival • Cash on Delivery (COD)
               </p>
             </div>
 

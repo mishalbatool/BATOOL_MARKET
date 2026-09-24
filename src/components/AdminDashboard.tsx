@@ -1,1282 +1,1316 @@
-import React, { useState, useRef } from 'react';
-import { Product, CategoryName, ImportPreviewItem, ImportReport } from '../types';
-import { EXACT_CATEGORIES, CATEGORIES, normalizeCategoryName } from '../data/categories';
-import { ADMIN_PASSWORD_DEFAULT, IMAGE_UNAVAILABLE_FALLBACK } from '../utils/storage';
+import React, { useState, useRef, useEffect } from 'react';
+import { Product, CategoryName, ReviewItem } from '../types';
+import { EXACT_CATEGORIES, normalizeCategoryName } from '../data/categories';
 import { 
-  downloadImportTemplate, 
-  parseImportFile, 
-  processRawRowsForPreview, 
-  convertPreviewItemToProduct 
-} from '../utils/productImport';
+  loginAdmin, 
+  logoutAdmin, 
+  isCurrentlyAdmin, 
+  ADMIN_EMAIL 
+} from '../services/authService';
+import { uploadMediaFileToStorage, compressImageToSafeSize } from '../services/mediaService';
+import { getProductShareUrl } from '../services/productService';
 import { SafeProductImage } from './SafeProductImage';
 import { 
   Plus, 
-  Edit3, 
   Trash2, 
+  Edit3, 
   Search, 
-  Lock, 
-  Unlock, 
-  Save, 
   X, 
   Upload, 
-  FileSpreadsheet,
-  Download, 
+  Image as ImageIcon, 
+  Video, 
+  Check, 
+  AlertCircle, 
+  Lock, 
+  Unlock, 
+  RefreshCw, 
+  Save, 
+  Copy, 
+  Layers, 
+  Palette, 
+  Star, 
   Sparkles,
-  Check,
-  AlertCircle,
-  AlertTriangle,
-  RefreshCw,
-  Eye,
-  CheckCircle2,
-  FileText
+  ExternalLink,
+  ShieldAlert
 } from 'lucide-react';
+
+const IMAGE_UNAVAILABLE_FALLBACK = "https://images.unsplash.com/photo-1522335789203-aabd1fc54bc9?auto=format&fit=crop&q=80&w=800";
 
 interface AdminDashboardProps {
   products: Product[];
-  onSaveProduct: (product: Product) => void;
-  onDeleteProduct: (productId: string) => void;
-  onDeleteMultipleProducts: (productIds: string[]) => void;
-  onImportProducts: (newProducts: Product[], mode: 'add' | 'replace') => void;
+  onSaveProduct: (p: Product) => Promise<void>;
+  onDeleteProduct: (id: string) => Promise<void>;
   onClose: () => void;
+  initialOpenAdd?: boolean;
+}
+
+interface ImageItem {
+  id: string;
+  previewUrl: string;
+  file?: File;
+  isExistingUrl?: boolean;
 }
 
 export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   products,
   onSaveProduct,
   onDeleteProduct,
-  onDeleteMultipleProducts,
-  onImportProducts,
   onClose,
+  initialOpenAdd = false,
 }) => {
   // Authentication
-  const [isAuthenticated, setIsAuthenticated] = useState(false);
-  const [passwordInput, setPasswordInput] = useState('');
+  const [isAuthenticated, setIsAuthenticated] = useState(() => isCurrentlyAdmin());
+  const [emailInput, setEmailInput] = useState(ADMIN_EMAIL);
+  const [passwordInput, setPasswordInput] = useState('batool2026');
   const [authError, setAuthError] = useState('');
-
-  // Selected products for batch delete
-  const [selectedProductIds, setSelectedProductIds] = useState<string[]>([]);
+  const [authNotice, setAuthNotice] = useState('');
+  const [isLoggingIn, setIsLoggingIn] = useState(false);
 
   // Search & Filter
   const [adminSearch, setAdminSearch] = useState('');
   const [adminCategoryFilter, setAdminCategoryFilter] = useState<string>('all');
   const [toastMessage, setToastMessage] = useState<string | null>(null);
 
-  // Edit / Add Modal state
+  // Simple Add/Edit Product Modal State
   const [isFormOpen, setIsFormOpen] = useState(false);
+  const [isSaving, setIsSaving] = useState(false);
+  const [saveStatusText, setSaveStatusText] = useState('Saving product...');
+  const [formError, setFormError] = useState<string | null>(null);
   const [editingProduct, setEditingProduct] = useState<Partial<Product> | null>(null);
-  const [extraImagesInput, setExtraImagesInput] = useState<string>('');
 
-  // Import flow state
-  const [isImportModalOpen, setIsImportModalOpen] = useState(false);
-  const [importStep, setImportStep] = useState<'upload' | 'preview' | 'report'>('upload');
-  const [previewItems, setPreviewItems] = useState<ImportPreviewItem[]>([]);
-  const [importErrors, setImportErrors] = useState<{ rowNumber: number; id?: string; name?: string; message: string }[]>([]);
-  const [importOption, setImportOption] = useState<'add' | 'replace'>('add');
-  const [duplicateResolution, setDuplicateResolution] = useState<'update' | 'skip'>('update');
-  const [isConfirmingReplace, setIsConfirmingReplace] = useState(false);
-  const [importReport, setImportReport] = useState<ImportReport | null>(null);
-  const [isReadingFile, setIsReadingFile] = useState(false);
+  // Multiple image upload items
+  const [imageItems, setImageItems] = useState<ImageItem[]>([]);
+  const [selectedMainImageIndex, setSelectedMainImageIndex] = useState<number>(0);
+  const [newImageUrlInput, setNewImageUrlInput] = useState('');
+
+  // Video state
+  const [videoFile, setVideoFile] = useState<File | null>(null);
+  const [videoPreviewUrl, setVideoPreviewUrl] = useState<string>('');
+  const [videoUrlInput, setVideoUrlInput] = useState<string>('');
+  const [videoPreviewError, setVideoPreviewError] = useState(false);
+
+  // Sizes & Colors string inputs (comma separated)
+  const [sizesInput, setSizesInput] = useState('');
+  const [colorsInput, setColorsInput] = useState('');
+
+  // Reviews list management inside product edit
+  const [productReviews, setProductReviews] = useState<ReviewItem[]>([]);
+
+  // Delete modal state
+  const [productToDelete, setProductToDelete] = useState<Product | null>(null);
+  const [isDeleting, setIsDeleting] = useState(false);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const videoFileInputRef = useRef<HTMLInputElement>(null);
 
   const showToast = (msg: string) => {
     setToastMessage(msg);
-    setTimeout(() => setToastMessage(null), 3000);
+    setTimeout(() => setToastMessage(null), 3500);
   };
 
-  const handleLogin = (e: React.FormEvent) => {
+  // If initialOpenAdd was requested and authenticated, open add form immediately
+  useEffect(() => {
+    if (initialOpenAdd && isAuthenticated && !isFormOpen) {
+      handleOpenAdd();
+    }
+  }, [initialOpenAdd, isAuthenticated]);
+
+  const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (passwordInput.trim() === ADMIN_PASSWORD_DEFAULT) {
+    setIsLoggingIn(true);
+    setAuthError('');
+    setAuthNotice('');
+
+    const res = await loginAdmin(passwordInput, emailInput);
+    setIsLoggingIn(false);
+
+    if (res.success) {
       setIsAuthenticated(true);
-      setAuthError('');
-      showToast('Admin access granted');
+      if (res.providerNeeded && res.error) {
+        setAuthNotice(res.error);
+      }
+      showToast('Admin authenticated successfully');
+      if (initialOpenAdd) {
+        handleOpenAdd();
+      }
     } else {
-      setAuthError(`Incorrect password. Default is: ${ADMIN_PASSWORD_DEFAULT}`);
+      setAuthError(res.error || 'Authentication failed. Please check credentials.');
     }
   };
 
-  // Open Add Product
+  const handleLogout = async () => {
+    await logoutAdmin();
+    setIsAuthenticated(false);
+    setPasswordInput('');
+    showToast('Admin logged out');
+  };
+
+  // Open "Add Product" Clean Form
   const handleOpenAdd = () => {
-    const newId = 'BM' + (products.length + 1).toString().padStart(3, '0');
+    const nextNum = products.length + 1;
+    const newId = 'BM' + nextNum.toString().padStart(3, '0');
+
     setEditingProduct({
       id: newId,
       name: '',
       category: 'Cosmetics',
-      price: 2500,
-      salePrice: 1999,
-      discountPercent: 20,
-      image: '',
-      images: [],
-      shortDescription: '',
       description: '',
-      stock: 10,
-      status: 'in_stock',
+      price: 1999,
+      salePrice: 1699,
+      stock: 15,
+      rating: 5.0,
+      reviewsCount: 1,
       featured: false,
       newArrival: true,
       sku: '',
-      rating: 5.0,
-      reviewsCount: 1,
     });
-    setExtraImagesInput('');
+
+    setImageItems([]);
+    setSelectedMainImageIndex(0);
+    setNewImageUrlInput('');
+    setVideoFile(null);
+    setVideoPreviewUrl('');
+    setVideoUrlInput('');
+    setVideoPreviewError(false);
+    setSizesInput('');
+    setColorsInput('');
+    setProductReviews([]);
+    setFormError(null);
     setIsFormOpen(true);
   };
 
-  // Open Edit Product
+  // Open "Edit Product" Clean Form with prefilled data
   const handleOpenEdit = (p: Product) => {
     setEditingProduct({ ...p });
-    setExtraImagesInput((p.images || []).filter(img => img !== p.image).join('\n'));
+
+    // Populate images
+    const existingImgs = p.images && p.images.length > 0 
+      ? [...p.images] 
+      : (p.image ? [p.image] : []);
+
+    const loadedItems: ImageItem[] = existingImgs.map((url, idx) => ({
+      id: `existing_${idx}_${Date.now()}`,
+      previewUrl: url,
+      isExistingUrl: true,
+    }));
+
+    setImageItems(loadedItems);
+    const mainIdx = existingImgs.indexOf(p.image);
+    setSelectedMainImageIndex(mainIdx >= 0 ? mainIdx : 0);
+
+    setNewImageUrlInput('');
+    setVideoFile(null);
+    setVideoPreviewUrl(p.video || '');
+    setVideoUrlInput(p.video || '');
+    setVideoPreviewError(false);
+    setSizesInput((p.sizes || []).join(', '));
+    setColorsInput((p.colors || []).join(', '));
+    setProductReviews(p.reviews ? [...p.reviews] : []);
+    setFormError(null);
     setIsFormOpen(true);
   };
 
-  // Save product form
-  const handleFormSubmit = (e: React.FormEvent) => {
+  // Handle multiple image file selection & preview
+  const handleImageFilesSelected = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = e.target.files;
+    if (!files || files.length === 0) return;
+
+    const newItems: ImageItem[] = Array.from(files).map((file, idx) => ({
+      id: `file_${Date.now()}_${idx}`,
+      previewUrl: URL.createObjectURL(file),
+      file: file,
+      isExistingUrl: false,
+    }));
+
+    setImageItems(prev => [...prev, ...newItems]);
+
+    // Reset input
+    if (fileInputRef.current) fileInputRef.current.value = '';
+  };
+
+  // Add image by URL
+  const handleAddImageUrl = () => {
+    const url = newImageUrlInput.trim();
+    if (!url) return;
+
+    setImageItems(prev => [
+      ...prev,
+      {
+        id: `url_${Date.now()}`,
+        previewUrl: url,
+        isExistingUrl: true,
+      }
+    ]);
+    setNewImageUrlInput('');
+  };
+
+  // Remove an image preview
+  const handleRemoveImage = (indexToRemove: number) => {
+    setImageItems(prev => {
+      const removed = prev[indexToRemove];
+      if (removed && removed.previewUrl.startsWith('blob:')) {
+        URL.revokeObjectURL(removed.previewUrl);
+      }
+      const next = prev.filter((_, idx) => idx !== indexToRemove);
+      if (selectedMainImageIndex >= next.length) {
+        setSelectedMainImageIndex(Math.max(0, next.length - 1));
+      }
+      return next;
+    });
+  };
+
+  // Handle video file upload
+  const handleVideoFileSelected = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    if (file.size > 50 * 1024 * 1024) {
+      alert("Video file size is larger than 50MB. Please select a smaller video or enter a direct streaming URL.");
+      return;
+    }
+
+    if (videoPreviewUrl.startsWith('blob:')) {
+      URL.revokeObjectURL(videoPreviewUrl);
+    }
+
+    const objectUrl = URL.createObjectURL(file);
+    setVideoFile(file);
+    setVideoPreviewUrl(objectUrl);
+    setVideoUrlInput('');
+    setVideoPreviewError(false);
+
+    if (videoFileInputRef.current) videoFileInputRef.current.value = '';
+  };
+
+  // Handle removing video
+  const handleRemoveVideo = () => {
+    if (videoPreviewUrl.startsWith('blob:')) {
+      URL.revokeObjectURL(videoPreviewUrl);
+    }
+    setVideoFile(null);
+    setVideoPreviewUrl('');
+    setVideoUrlInput('');
+    setVideoPreviewError(false);
+  };
+
+  // Copy product link with feedback
+  const handleCopyLink = (p: Product) => {
+    const url = getProductShareUrl(p);
+    navigator.clipboard.writeText(url).then(() => {
+      showToast("Product link copied!");
+    }).catch(() => {
+      prompt("Product link copied! Share URL:", url);
+    });
+  };
+
+  // Save / Update Product
+  const handleFormSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!editingProduct || !editingProduct.name || !editingProduct.id) {
-      alert('Please fill out Product ID and Product Name.');
+    setFormError(null);
+
+    if (!editingProduct || !editingProduct.name?.trim() || !editingProduct.id?.trim()) {
+      setFormError('Please provide Product Name and Product ID.');
       return;
     }
 
-    const price = Number(editingProduct.price) || 0;
-    const salePrice = Number(editingProduct.salePrice) || price;
-    const discountPercent = price > salePrice
-      ? Math.round(((price - salePrice) / price) * 100)
-      : 0;
+    setIsSaving(true);
+    setSaveStatusText('Validating product details...');
 
-    const stock = Number(editingProduct.stock) || 0;
-    const status: 'in_stock' | 'low_stock' | 'out_of_stock' =
-      stock <= 0 ? 'out_of_stock' : stock <= 5 ? 'low_stock' : 'in_stock';
-
-    // Parse extra images from textarea
-    const parsedImages = extraImagesInput
-      .split('\n')
-      .map(s => s.trim())
-      .filter(s => s.length > 0);
-
-    const primaryImage = editingProduct.image?.trim() || IMAGE_UNAVAILABLE_FALLBACK;
-    const combinedImages = [primaryImage, ...parsedImages.filter(img => img !== primaryImage)];
-
-    const completeProduct: Product = {
-      id: editingProduct.id.trim(),
-      name: editingProduct.name.trim(),
-      category: (editingProduct.category as CategoryName) || 'Other',
-      description: editingProduct.description || `${editingProduct.name} available at Batool Market.`,
-      shortDescription: editingProduct.shortDescription || '',
-      image: primaryImage,
-      images: combinedImages,
-      price,
-      salePrice,
-      discountPercent,
-      stock,
-      status,
-      featured: !!editingProduct.featured,
-      newArrival: !!editingProduct.newArrival,
-      sku: editingProduct.sku?.trim() || undefined,
-      rating: editingProduct.rating || 5.0,
-      reviewsCount: editingProduct.reviewsCount || 1,
-      createdAt: editingProduct.createdAt || new Date().toISOString()
-    };
-
-    onSaveProduct(completeProduct);
-    setIsFormOpen(false);
-    showToast(`Saved product "${completeProduct.name}"`);
-  };
-
-  // Delete product with confirmation
-  const handleDeleteWithConfirm = (product: Product) => {
-    if (window.confirm(`Are you sure you want to delete product "${product.name}" (${product.id})?`)) {
-      onDeleteProduct(product.id);
-      setSelectedProductIds(prev => prev.filter(id => id !== product.id));
-      showToast(`Deleted ${product.name}`);
-    }
-  };
-
-  // Batch delete with confirmation
-  const handleBatchDelete = () => {
-    if (selectedProductIds.length === 0) return;
-    if (window.confirm(`Are you sure you want to delete all ${selectedProductIds.length} selected products?`)) {
-      onDeleteMultipleProducts(selectedProductIds);
-      setSelectedProductIds([]);
-      showToast(`Deleted ${selectedProductIds.length} products`);
-    }
-  };
-
-  // Toggle selection
-  const handleToggleSelectProduct = (id: string) => {
-    setSelectedProductIds(prev => 
-      prev.includes(id) ? prev.filter(item => item !== id) : [...prev, id]
-    );
-  };
-
-  const handleSelectAll = (filteredList: Product[]) => {
-    if (selectedProductIds.length === filteredList.length) {
-      setSelectedProductIds([]);
-    } else {
-      setSelectedProductIds(filteredList.map(p => p.id));
-    }
-  };
-
-  // File upload for image (convert to data URL safely)
-  const handleImageFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-
-    if (file.size > 2 * 1024 * 1024) {
-      alert("Selected image is larger than 2MB. Please choose a smaller image or use an image URL.");
-      return;
-    }
-
-    const reader = new FileReader();
-    reader.onload = () => {
-      if (typeof reader.result === 'string') {
-        setEditingProduct(prev => ({
-          ...prev,
-          image: reader.result as string
-        }));
-      }
-    };
-    reader.readAsDataURL(file);
-  };
-
-  // ==========================================
-  // BULK IMPORT LOGIC
-  // ==========================================
-  const handleOpenImport = () => {
-    setImportStep('upload');
-    setPreviewItems([]);
-    setImportErrors([]);
-    setImportOption('add');
-    setDuplicateResolution('update');
-    setIsConfirmingReplace(false);
-    setImportReport(null);
-    setIsImportModalOpen(true);
-  };
-
-  const handleFileSelected = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-
-    setIsReadingFile(true);
     try {
-      const rawRows = await parseImportFile(file);
-      if (rawRows.length === 0) {
-        alert("The uploaded file does not contain any product data rows.");
-        setIsReadingFile(false);
-        return;
+      const productId = editingProduct.id.trim();
+
+      // 1. Process Images
+      setSaveStatusText('Processing product images...');
+      const finalImageUrls: string[] = [];
+
+      for (let i = 0; i < imageItems.length; i++) {
+        const item = imageItems[i];
+        if (item.file) {
+          setSaveStatusText(`Uploading image ${i + 1} of ${imageItems.length}...`);
+          try {
+            // Attempt upload to Firebase Storage
+            const downloadUrl = await uploadMediaFileToStorage(item.file, 'images', productId);
+            finalImageUrls.push(downloadUrl);
+          } catch (storageErr: any) {
+            console.warn("Storage upload notice, optimizing image fallback:", storageErr.message);
+            // If Storage bucket is not enabled yet in Firebase Console, compress down to web size (<35KB)
+            // so Firestore's 1MB document limit is never exceeded!
+            const safeDataUrl = await compressImageToSafeSize(item.file, 800, 0.7);
+            finalImageUrls.push(safeDataUrl);
+          }
+        } else {
+          finalImageUrls.push(item.previewUrl);
+        }
       }
 
-      const { items, errors } = processRawRowsForPreview(rawRows, products);
-      setPreviewItems(items);
-      setImportErrors(errors);
-      setImportStep('preview');
+      if (finalImageUrls.length === 0) {
+        finalImageUrls.push(IMAGE_UNAVAILABLE_FALLBACK);
+      }
+
+      const mainImage = finalImageUrls[selectedMainImageIndex] || finalImageUrls[0];
+
+      // 2. Process Video
+      let finalVideoUrl: string | null = null;
+
+      if (videoFile) {
+        setSaveStatusText('Uploading video to Firebase Storage (0%)...');
+        try {
+          const downloadUrl = await uploadMediaFileToStorage(
+            videoFile,
+            'videos',
+            productId,
+            (percent) => {
+              setSaveStatusText(`Uploading video to Firebase Storage (${percent}%)...`);
+            }
+          );
+          finalVideoUrl = downloadUrl;
+        } catch (videoErr: any) {
+          // If storage bucket is not activated, notify admin clearly and abort!
+          throw new Error(
+            `Video upload failed: ${videoErr?.message || 'Storage error'}. If you don't have Storage enabled in Firebase Console, you can enter a direct streaming video URL instead.`
+          );
+        }
+      } else if (videoUrlInput.trim()) {
+        finalVideoUrl = videoUrlInput.trim();
+      } else if (editingProduct.video && !videoFile && videoPreviewUrl === editingProduct.video) {
+        finalVideoUrl = editingProduct.video;
+      }
+
+      // 3. Prepare product data
+      setSaveStatusText('Saving product to shared database...');
+
+      const price = Number(editingProduct.price) || 0;
+      const salePrice = editingProduct.salePrice !== undefined && editingProduct.salePrice !== null && Number(editingProduct.salePrice) > 0 
+        ? Number(editingProduct.salePrice) 
+        : price;
+      const discountPercent = price > salePrice
+        ? Math.round(((price - salePrice) / price) * 100)
+        : 0;
+
+      const stock = Number(editingProduct.stock) || 0;
+      const status: 'in_stock' | 'low_stock' | 'out_of_stock' =
+        stock <= 0 ? 'out_of_stock' : stock <= 5 ? 'low_stock' : 'in_stock';
+
+      // Parse sizes and colors
+      const parsedSizes = sizesInput
+        .split(',')
+        .map(s => s.trim())
+        .filter(s => s.length > 0);
+
+      const parsedColors = colorsInput
+        .split(',')
+        .map(c => c.trim())
+        .filter(c => c.length > 0);
+
+      const completeProduct: Product = {
+        id: productId,
+        name: editingProduct.name.trim(),
+        category: normalizeCategoryName(editingProduct.category),
+        description: editingProduct.description?.trim() || `${editingProduct.name} - high quality item from Batool Market.`,
+        shortDescription: editingProduct.shortDescription?.trim() || '',
+        image: mainImage,
+        images: finalImageUrls,
+        video: finalVideoUrl || undefined,
+        price,
+        salePrice,
+        discountPercent,
+        stock,
+        status,
+        sizes: parsedSizes.length > 0 ? parsedSizes : [],
+        colors: parsedColors.length > 0 ? parsedColors : [],
+        rating: Number(editingProduct.rating) || 5.0,
+        reviewsCount: productReviews.length > 0 ? productReviews.length : (Number(editingProduct.reviewsCount) || 1),
+        reviews: productReviews.length > 0 ? productReviews : [],
+        featured: Boolean(editingProduct.featured),
+        newArrival: Boolean(editingProduct.newArrival),
+        sku: editingProduct.sku?.trim() || productId,
+        createdAt: editingProduct.createdAt || new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      };
+
+      // 4. Save and verify write in Firestore
+      await onSaveProduct(completeProduct);
+
+      setIsFormOpen(false);
+      showToast(`Product "${completeProduct.name}" saved successfully.`);
     } catch (err: any) {
-      console.error(err);
-      alert(`Failed to read file: ${err.message || 'Unknown format'}`);
+      console.error("Error saving product:", err);
+      setFormError(err?.message || "Unable to save product. Please try again.");
     } finally {
-      setIsReadingFile(false);
-      if (fileInputRef.current) fileInputRef.current.value = '';
+      setIsSaving(false);
     }
   };
 
-  const executeImport = () => {
-    if (previewItems.length === 0) {
-      alert("No valid products to import.");
-      return;
+  // Confirm delete single product
+  const handleConfirmDelete = async () => {
+    if (!productToDelete) return;
+    setIsDeleting(true);
+    try {
+      await onDeleteProduct(productToDelete.id);
+      showToast(`Deleted "${productToDelete.name}"`);
+      setProductToDelete(null);
+    } catch (err: any) {
+      alert("Error deleting product: " + (err?.message || err));
+    } finally {
+      setIsDeleting(false);
     }
-
-    let successCount = 0;
-    let updatedCount = 0;
-    let skippedCount = 0;
-    const executionErrors: { rowNumber: number; id?: string; name?: string; message: string }[] = [...importErrors];
-
-    const existingMap = new Map(products.map(p => [p.id.toLowerCase(), p]));
-    const finalProductsMap = new Map<string, Product>();
-
-    if (importOption === 'add') {
-      // Keep existing products
-      products.forEach(p => finalProductsMap.set(p.id.toLowerCase(), p));
-
-      // Process new ones
-      previewItems.forEach((item, idx) => {
-        const key = item.id.toLowerCase();
-        const product = convertPreviewItemToProduct(item);
-
-        if (existingMap.has(key)) {
-          if (duplicateResolution === 'update') {
-            finalProductsMap.set(key, product);
-            updatedCount++;
-          } else {
-            skippedCount++;
-          }
-        } else {
-          finalProductsMap.set(key, product);
-          successCount++;
-        }
-      });
-    } else {
-      // 'replace': completely replace all products
-      previewItems.forEach((item, idx) => {
-        const key = item.id.toLowerCase();
-        const product = convertPreviewItemToProduct(item);
-        if (finalProductsMap.has(key)) {
-          if (duplicateResolution === 'update') {
-            finalProductsMap.set(key, product);
-            updatedCount++;
-          } else {
-            skippedCount++;
-          }
-        } else {
-          finalProductsMap.set(key, product);
-          successCount++;
-        }
-      });
-    }
-
-    const finalProductList = Array.from(finalProductsMap.values());
-    onImportProducts(finalProductList, importOption);
-
-    const report: ImportReport = {
-      totalParsed: previewItems.length + importErrors.length,
-      successCount,
-      updatedCount,
-      skippedCount,
-      errorCount: executionErrors.length,
-      errors: executionErrors
-    };
-
-    setImportReport(report);
-    setImportStep('report');
-    setIsConfirmingReplace(false);
-    showToast(`Successfully processed import (${finalProductList.length} total products)`);
   };
 
-  // Filtered Products in Admin Table
-  const filteredAdminProducts = products.filter(p => {
-    const matchesSearch = adminSearch.trim() === '' || 
+  // Filter products
+  const filteredProducts = products.filter(p => {
+    const matchesSearch = 
       (p.name || '').toLowerCase().includes(adminSearch.toLowerCase()) ||
       (p.id || '').toLowerCase().includes(adminSearch.toLowerCase()) ||
-      (p.sku || '').toLowerCase().includes(adminSearch.toLowerCase()) ||
-      (p.category || '').toLowerCase().includes(adminSearch.toLowerCase());
+      (p.category || '').toLowerCase().includes(adminSearch.toLowerCase()) ||
+      (p.sku && p.sku.toLowerCase().includes(adminSearch.toLowerCase()));
 
-    const matchesCategory = adminCategoryFilter === 'all' || p.category === adminCategoryFilter;
+    const matchesCategory = 
+      adminCategoryFilter === 'all' || 
+      normalizeCategoryName(p.category) === normalizeCategoryName(adminCategoryFilter);
+
     return matchesSearch && matchesCategory;
   });
 
   return (
-    <div className="fixed inset-0 z-50 overflow-hidden bg-stone-900/60 backdrop-blur-xs flex items-center justify-center p-2 sm:p-4 animate-in fade-in duration-200">
-      
-      {/* Toast */}
+    <div className="fixed inset-0 z-50 overflow-y-auto bg-stone-950/75 backdrop-blur-xs flex items-center justify-center p-2 sm:p-4">
+      {/* Toast Notification */}
       {toastMessage && (
-        <div className="fixed top-5 right-5 z-60 bg-stone-900 text-white text-xs px-4 py-3 rounded-xl shadow-xl flex items-center gap-2 border border-stone-700 animate-in slide-in-from-top-2">
+        <div className="fixed top-6 right-6 z-80 bg-stone-900 text-[#FAF9F5] px-4 py-2.5 rounded-xl shadow-xl border border-amber-600/40 text-xs font-semibold flex items-center gap-2 animate-in fade-in slide-in-from-top-2">
           <Check className="w-4 h-4 text-emerald-400" />
           <span>{toastMessage}</span>
         </div>
       )}
 
-      <div className="bg-[#FAF9F5] border border-stone-300 w-full max-w-7xl h-[92vh] rounded-2xl sm:rounded-3xl shadow-2xl flex flex-col overflow-hidden">
+      {/* Main Container */}
+      <div className="bg-[#FAF9F5] border border-stone-300 w-full max-w-6xl rounded-2xl sm:rounded-3xl shadow-2xl overflow-hidden flex flex-col max-h-[94vh]">
         
-        {/* Top Header */}
-        <div className="p-4 sm:p-5 bg-white border-b border-stone-200 flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-xl bg-amber-100/80 text-amber-900 flex items-center justify-center font-bold">
-              {isAuthenticated ? <Unlock className="w-5 h-5 text-amber-700" /> : <Lock className="w-5 h-5 text-amber-700" />}
+        {/* Header */}
+        <div className="bg-stone-900 text-[#FAF9F5] px-4 sm:px-6 py-4 flex items-center justify-between shrink-0 border-b border-stone-800">
+          <div className="flex items-center gap-2 sm:gap-3">
+            <div className="w-9 h-9 rounded-xl bg-amber-600/30 border border-amber-500/40 flex items-center justify-center text-amber-400">
+              <Lock className="w-4 h-4" />
             </div>
             <div>
-              <div className="flex items-center gap-2">
-                <h2 className="font-serif text-lg sm:text-xl font-bold text-stone-900">
-                  Batool Market Product Management
-                </h2>
-                <span className="text-[10px] bg-stone-100 text-stone-700 font-mono px-2 py-0.5 rounded-full border border-stone-200">
-                  {products.length} Products
+              <h2 className="font-serif text-base sm:text-lg font-bold tracking-tight text-white flex items-center gap-2">
+                <span>Batool Market</span>
+                <span className="text-amber-500 text-xs font-sans px-2 py-0.5 rounded-full bg-amber-950/70 border border-amber-700/50">
+                  Admin Portal
                 </span>
-              </div>
-              <p className="text-xs text-stone-500">
-                Bulk import catalogues via CSV/Excel, manage stock, categories &amp; pricing without editing code.
+              </h2>
+              <p className="text-[11px] text-stone-400">
+                Single source of truth product management & shared Firestore database
               </p>
             </div>
           </div>
 
-          <button
-            onClick={onClose}
-            className="p-2 text-stone-400 hover:text-stone-800 rounded-full hover:bg-stone-100 transition-colors"
-            aria-label="Close admin dashboard"
-          >
-            <X className="w-5 h-5" />
-          </button>
+          <div className="flex items-center gap-2">
+            {isAuthenticated && (
+              <button
+                type="button"
+                onClick={handleLogout}
+                className="text-xs text-stone-300 hover:text-white px-3 py-1.5 rounded-lg border border-stone-700 hover:bg-stone-800 transition-colors flex items-center gap-1.5"
+              >
+                <Unlock className="w-3.5 h-3.5" />
+                <span>Logout</span>
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={onClose}
+              className="text-stone-400 hover:text-white p-1.5 rounded-lg hover:bg-stone-800 transition-colors"
+              aria-label="Close"
+            >
+              <X className="w-5 h-5" />
+            </button>
+          </div>
         </div>
 
-        {/* Auth Screen if not logged in */}
-        {!isAuthenticated ? (
-          <div className="flex-1 flex items-center justify-center p-6 bg-[#F5F2EA]">
-            <div className="bg-white p-6 sm:p-8 rounded-2xl border border-stone-200 shadow-md max-w-md w-full space-y-5 text-center">
-              <div className="w-14 h-14 rounded-full bg-amber-50 text-amber-800 flex items-center justify-center mx-auto">
-                <Lock className="w-7 h-7" />
-              </div>
-              <div>
-                <h3 className="font-serif text-xl font-bold text-stone-900">
-                  Store Owner Login
-                </h3>
-                <p className="text-xs text-stone-500 mt-1">
-                  Enter your store management password to access inventory and bulk product import.
-                </p>
-              </div>
+        {/* Notice Banner */}
+        {authNotice && (
+          <div className="bg-amber-50 border-b border-amber-200 px-4 py-2 text-xs text-amber-900 flex items-center gap-2 shrink-0">
+            <AlertCircle className="w-4 h-4 text-amber-700 shrink-0" />
+            <span>{authNotice}</span>
+          </div>
+        )}
 
-              <form onSubmit={handleLogin} className="space-y-3 text-left">
+        {/* Body Content */}
+        <div className="flex-1 overflow-y-auto p-4 sm:p-6 bg-[#FAF9F5]">
+          {!isAuthenticated ? (
+            /* Store Owner Login Form */
+            <div className="max-w-md mx-auto py-8 sm:py-14 text-center">
+              <div className="w-16 h-16 rounded-2xl bg-amber-100 text-amber-800 flex items-center justify-center mx-auto mb-4 shadow-inner">
+                <Lock className="w-8 h-8" />
+              </div>
+              <h3 className="font-serif text-2xl font-bold text-stone-900 mb-2">
+                Store Owner Authorization
+              </h3>
+              <p className="text-xs sm:text-sm text-stone-600 mb-6 leading-relaxed">
+                Only authorized store managers can create, modify, or delete products and media in the shared database.
+              </p>
+
+              <form onSubmit={handleLogin} className="space-y-4 bg-white p-6 rounded-2xl border border-stone-200 shadow-md text-left">
                 <div>
-                  <label className="block text-xs font-bold text-stone-700 mb-1">
-                    Admin Password
+                  <label className="block text-xs font-bold text-stone-700 uppercase tracking-wider mb-1.5">
+                    Admin Email
                   </label>
                   <input
+                    type="email"
+                    value={emailInput}
+                    onChange={(e) => setEmailInput(e.target.value)}
+                    required
+                    placeholder="mishalbatool572@gmail.com"
+                    className="w-full text-sm px-3.5 py-2.5 rounded-xl border border-stone-300 focus:outline-none focus:ring-2 focus:ring-amber-600 focus:border-amber-600 bg-stone-50/50"
+                  />
+                </div>
+
+                <div>
+                  <div className="flex items-center justify-between mb-1.5">
+                    <label className="block text-xs font-bold text-stone-700 uppercase tracking-wider">
+                      Admin Password
+                    </label>
+                    <span className="text-[11px] text-amber-700 font-medium">Default: batool2026</span>
+                  </div>
+                  <input
                     type="password"
-                    placeholder="Enter password..."
                     value={passwordInput}
                     onChange={(e) => setPasswordInput(e.target.value)}
-                    className="w-full p-2.5 bg-stone-50 rounded-xl border border-stone-300 text-xs focus:outline-none focus:border-amber-600"
-                    autoFocus
+                    required
+                    placeholder="batool2026"
+                    className="w-full text-sm px-3.5 py-2.5 rounded-xl border border-stone-300 focus:outline-none focus:ring-2 focus:ring-amber-600 focus:border-amber-600 bg-stone-50/50"
                   />
-                  {authError && (
-                    <p className="text-[11px] text-red-600 mt-1">{authError}</p>
-                  )}
+                  <p className="text-[11px] text-stone-500 mt-1">
+                    Store owner password: <span className="font-mono font-semibold text-stone-800">batool2026</span>
+                  </p>
                 </div>
+
+                {authError && (
+                  <div className="text-xs text-red-600 bg-red-50 p-2.5 rounded-lg border border-red-200 flex items-center gap-1.5">
+                    <AlertCircle className="w-4 h-4 shrink-0" />
+                    <span>{authError}</span>
+                  </div>
+                )}
 
                 <button
                   type="submit"
-                  className="w-full bg-[#181816] hover:bg-stone-800 text-white font-bold py-2.5 rounded-xl text-xs transition-all shadow-xs"
+                  disabled={isLoggingIn}
+                  className="w-full bg-stone-900 hover:bg-stone-800 text-white text-sm font-semibold py-2.5 rounded-xl shadow-md transition-all flex items-center justify-center gap-2 disabled:opacity-50 cursor-pointer"
                 >
-                  Unlock Admin Portal
+                  {isLoggingIn ? (
+                    <>
+                      <RefreshCw className="w-4 h-4 animate-spin" />
+                      <span>Authenticating...</span>
+                    </>
+                  ) : (
+                    <>
+                      <Unlock className="w-4 h-4" />
+                      <span>Access Product Management</span>
+                    </>
+                  )}
                 </button>
               </form>
-
-              <div className="pt-2 text-[11px] text-stone-400 border-t border-stone-100">
-                Default password: <span className="font-mono text-stone-600 font-bold">{ADMIN_PASSWORD_DEFAULT}</span>
-              </div>
             </div>
-          </div>
-        ) : (
-          /* Authenticated Dashboard Content */
-          <div className="flex-1 flex flex-col overflow-hidden">
-            
-            {/* Action Bar: Search, Category Filter, Buttons */}
-            <div className="p-3 sm:p-4 bg-white border-b border-stone-200 flex flex-wrap items-center justify-between gap-3">
-              
-              {/* Search & Filter */}
-              <div className="flex flex-wrap items-center gap-2 flex-1 min-w-[280px]">
-                <div className="relative flex-1 min-w-[160px] max-w-xs">
-                  <Search className="w-3.5 h-3.5 text-stone-400 absolute left-2.5 top-3" />
+          ) : (
+            /* Authenticated Admin Product Panel */
+            <div className="space-y-5">
+              {/* Top Controls: Add Product, Search, Filter */}
+              <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3 bg-white p-4 rounded-2xl border border-stone-200/90 shadow-2xs">
+                {/* Prominent Add Product Button */}
+                <button
+                  type="button"
+                  onClick={handleOpenAdd}
+                  className="bg-amber-700 hover:bg-amber-800 text-white text-xs sm:text-sm font-semibold px-5 py-2.5 rounded-xl shadow-md transition-all flex items-center justify-center gap-2 active:scale-98 shrink-0 cursor-pointer"
+                >
+                  <Plus className="w-4 h-4 stroke-[2.5]" />
+                  <span>Add Product</span>
+                </button>
+
+                {/* Search Bar */}
+                <div className="relative flex-1 max-w-md">
+                  <Search className="w-4 h-4 text-stone-400 absolute left-3 top-1/2 -translate-y-1/2" />
                   <input
                     type="text"
-                    placeholder="Search by ID, SKU, title, category..."
+                    placeholder="Search by name, ID, SKU, category..."
                     value={adminSearch}
                     onChange={(e) => setAdminSearch(e.target.value)}
-                    className="w-full pl-8 pr-3 py-2 text-xs bg-stone-50 border border-stone-300 rounded-xl focus:outline-none focus:border-amber-600"
+                    className="w-full text-xs pl-9 pr-3 py-2 rounded-xl border border-stone-300 focus:outline-none focus:ring-1 focus:ring-amber-600 bg-stone-50"
                   />
+                  {adminSearch && (
+                    <button
+                      type="button"
+                      onClick={() => setAdminSearch('')}
+                      className="absolute right-2.5 top-1/2 -translate-y-1/2 text-stone-400 hover:text-stone-700"
+                    >
+                      <X className="w-3.5 h-3.5" />
+                    </button>
+                  )}
                 </div>
 
+                {/* Category Filter */}
                 <select
                   value={adminCategoryFilter}
                   onChange={(e) => setAdminCategoryFilter(e.target.value)}
-                  className="text-xs bg-stone-50 border border-stone-300 rounded-xl px-2.5 py-2 text-stone-700 focus:outline-none cursor-pointer"
+                  className="text-xs py-2 px-3 rounded-xl border border-stone-300 bg-stone-50 focus:outline-none focus:ring-1 focus:ring-amber-600 shrink-0"
                 >
                   <option value="all">All Categories ({products.length})</option>
-                  {EXACT_CATEGORIES.map(c => {
-                    const count = products.filter(p => p.category === c).length;
-                    return (
-                      <option key={c} value={c}>{c} ({count})</option>
-                    );
-                  })}
+                  {EXACT_CATEGORIES.map((cat: string) => (
+                    <option key={cat} value={cat}>
+                      {cat}
+                    </option>
+                  ))}
                 </select>
-
-                {selectedProductIds.length > 0 && (
-                  <button
-                    onClick={handleBatchDelete}
-                    className="inline-flex items-center gap-1.5 bg-red-50 hover:bg-red-100 text-red-700 border border-red-200 text-xs font-semibold px-3 py-2 rounded-xl transition-all"
-                  >
-                    <Trash2 className="w-3.5 h-3.5" />
-                    <span>Delete Selected ({selectedProductIds.length})</span>
-                  </button>
-                )}
               </div>
 
-              {/* Action Buttons: Add, Import, Download Template */}
-              <div className="flex flex-wrap items-center gap-2">
-                <button
-                  onClick={() => downloadImportTemplate('csv')}
-                  className="inline-flex items-center gap-1.5 bg-stone-100 hover:bg-stone-200 text-stone-700 text-xs font-semibold px-3 py-2 rounded-xl transition-all border border-stone-300"
-                  title="Download CSV template format for importing products"
-                >
-                  <Download className="w-3.5 h-3.5" />
-                  <span>Download Import Template</span>
-                </button>
-
-                <button
-                  onClick={handleOpenImport}
-                  className="inline-flex items-center gap-1.5 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold px-3.5 py-2 rounded-xl transition-all shadow-xs"
-                >
-                  <Upload className="w-3.5 h-3.5" />
-                  <span>Import Products</span>
-                </button>
-
-                <button
-                  onClick={handleOpenAdd}
-                  className="inline-flex items-center gap-1.5 bg-[#181816] hover:bg-stone-800 text-[#FAF9F5] text-xs font-bold px-3.5 py-2 rounded-xl transition-all shadow-xs"
-                >
-                  <Plus className="w-3.5 h-3.5" />
-                  <span>Add Product</span>
-                </button>
-              </div>
-
-            </div>
-
-            {/* Product Table */}
-            <div className="flex-1 overflow-auto bg-[#FAF9F5] p-3 sm:p-4">
-              {filteredAdminProducts.length === 0 ? (
-                <div className="h-full min-h-[300px] flex flex-col items-center justify-center text-center p-6 space-y-4 bg-white rounded-2xl border border-stone-200">
-                  <div className="w-16 h-16 rounded-full bg-amber-50 text-amber-800 flex items-center justify-center">
-                    <FileSpreadsheet className="w-8 h-8" />
-                  </div>
-                  <div>
-                    <h3 className="font-serif text-lg font-bold text-stone-800">
-                      {products.length === 0 ? "No products available yet." : "No matching products found"}
-                    </h3>
-                    <p className="text-xs text-stone-500 mt-1 max-w-sm">
-                      {products.length === 0 
-                        ? "Click 'Import Products' to upload your CSV/Excel catalogue, or click 'Add Product' to create your first item." 
-                        : "Try clearing your search query or choosing another category filter."}
-                    </p>
-                  </div>
-                  {products.length === 0 && (
-                    <div className="flex flex-wrap items-center gap-3 pt-2">
-                      <button
-                        onClick={handleOpenImport}
-                        className="bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold py-2.5 px-5 rounded-xl transition-all shadow-xs inline-flex items-center gap-1.5"
-                      >
-                        <Upload className="w-4 h-4" />
-                        <span>Import Products Now</span>
-                      </button>
-                      <button
-                        onClick={handleOpenAdd}
-                        className="bg-[#181816] hover:bg-stone-800 text-white text-xs font-bold py-2.5 px-5 rounded-xl transition-all shadow-xs inline-flex items-center gap-1.5"
-                      >
-                        <Plus className="w-4 h-4" />
-                        <span>Add Manually</span>
-                      </button>
-                    </div>
-                  )}
+              {/* Products Table / Cards */}
+              <div className="bg-white rounded-2xl border border-stone-200/90 shadow-2xs overflow-hidden">
+                <div className="p-3 sm:px-4 bg-stone-50 border-b border-stone-200 flex items-center justify-between text-xs text-stone-600">
+                  <span className="font-semibold">
+                    Catalogue: {filteredProducts.length} {filteredProducts.length === 1 ? 'Product' : 'Products'}
+                  </span>
+                  <span className="text-[11px] text-stone-400">
+                    Shared in Cloud • Visible to all shoppers
+                  </span>
                 </div>
-              ) : (
-                <div className="bg-white rounded-2xl border border-stone-200 overflow-hidden shadow-2xs">
-                  <table className="w-full text-left border-collapse text-xs">
-                    <thead>
-                      <tr className="bg-stone-100/90 text-stone-700 font-bold border-b border-stone-200">
-                        <th className="p-3 w-10 text-center">
-                          <input
-                            type="checkbox"
-                            checked={selectedProductIds.length === filteredAdminProducts.length && filteredAdminProducts.length > 0}
-                            onChange={() => handleSelectAll(filteredAdminProducts)}
-                            className="w-3.5 h-3.5 accent-amber-700 cursor-pointer"
-                          />
-                        </th>
-                        <th className="p-3">Image</th>
-                        <th className="p-3">Product</th>
-                        <th className="p-3">Category</th>
-                        <th className="p-3">Price</th>
-                        <th className="p-3">Stock</th>
-                        <th className="p-3">Status</th>
-                        <th className="p-3 text-right">Actions</th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-stone-100">
-                      {filteredAdminProducts.map((p) => {
-                        const isSelected = selectedProductIds.includes(p.id);
-                        return (
-                          <tr key={p.id} className={`hover:bg-amber-50/40 transition-colors ${isSelected ? 'bg-amber-50/70' : ''}`}>
-                            <td className="p-3 text-center">
-                              <input
-                                type="checkbox"
-                                checked={isSelected}
-                                onChange={() => handleToggleSelectProduct(p.id)}
-                                className="w-3.5 h-3.5 accent-amber-700 cursor-pointer"
+
+                {filteredProducts.length === 0 ? (
+                  <div className="p-12 text-center">
+                    <p className="text-stone-500 text-sm mb-3">No products match your current filter.</p>
+                    <button
+                      type="button"
+                      onClick={handleOpenAdd}
+                      className="inline-flex items-center gap-1.5 text-xs font-semibold text-amber-800 hover:underline cursor-pointer"
+                    >
+                      <Plus className="w-3.5 h-3.5" />
+                      <span>Add your first product now</span>
+                    </button>
+                  </div>
+                ) : (
+                  <div className="divide-y divide-stone-100">
+                    {filteredProducts.map((product) => {
+                      const isOutOfStock = product.stock <= 0;
+                      return (
+                        <div
+                          key={product.id}
+                          className="p-3 sm:p-4 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 hover:bg-stone-50/70 transition-colors"
+                        >
+                          {/* Left: Thumbnail & Info */}
+                          <div className="flex items-center gap-3 min-w-0 flex-1">
+                            <div className="w-14 h-14 rounded-xl overflow-hidden border border-stone-200 bg-[#F5F2EA] shrink-0 relative">
+                              <SafeProductImage
+                                src={product.image}
+                                alt={product.name}
+                                className="w-full h-full object-cover"
                               />
-                            </td>
-                            <td className="p-3">
-                              <div className="w-12 h-12 rounded-lg overflow-hidden bg-stone-100 border border-stone-200 shrink-0">
-                                <SafeProductImage
-                                  src={p.image}
-                                  alt={p.name}
-                                  className="w-full h-full object-cover"
-                                />
-                              </div>
-                            </td>
-                            <td className="p-3">
-                              <div className="font-bold text-stone-900 line-clamp-1 max-w-xs sm:max-w-md">
-                                {p.name}
-                              </div>
-                              <div className="flex items-center gap-2 text-[10px] text-stone-400 font-mono mt-0.5">
-                                <span>ID: {p.id}</span>
-                                {p.sku && <span>· SKU: {p.sku}</span>}
-                                {p.featured && <span className="text-amber-700 font-bold bg-amber-100/60 px-1 rounded">Featured</span>}
-                                {p.newArrival && <span className="text-stone-700 font-bold bg-stone-200/80 px-1 rounded">New</span>}
-                              </div>
-                            </td>
-                            <td className="p-3">
-                              <span className="font-medium text-stone-700 bg-stone-100 px-2 py-0.5 rounded text-[11px] truncate max-w-[140px] inline-block">
-                                {p.category}
-                              </span>
-                            </td>
-                            <td className="p-3">
-                              <div className="font-bold text-stone-900 font-mono">
-                                Rs. {p.salePrice.toLocaleString()}
-                              </div>
-                              {p.price > p.salePrice && (
-                                <div className="text-[10px] text-stone-400 line-through">
-                                  Rs. {p.price.toLocaleString()}
+                              {product.video && (
+                                <div className="absolute bottom-0.5 right-0.5 bg-stone-900/80 p-0.5 rounded text-amber-400">
+                                  <Video className="w-2.5 h-2.5" />
                                 </div>
                               )}
-                            </td>
-                            <td className="p-3">
-                              <span className="font-mono font-medium text-stone-800">
-                                {p.stock}
-                              </span>
-                            </td>
-                            <td className="p-3">
-                              {p.stock <= 0 || p.status === 'out_of_stock' ? (
-                                <span className="text-red-700 font-bold bg-red-50 border border-red-200 px-2 py-0.5 rounded text-[10px]">
-                                  Out of Stock
-                                </span>
-                              ) : p.stock <= 5 || p.status === 'low_stock' ? (
-                                <span className="text-amber-800 font-bold bg-amber-50 border border-amber-200 px-2 py-0.5 rounded text-[10px]">
-                                  Low Stock ({p.stock})
-                                </span>
-                              ) : (
-                                <span className="text-emerald-700 font-bold bg-emerald-50 border border-emerald-200 px-2 py-0.5 rounded text-[10px]">
-                                  In Stock
-                                </span>
-                              )}
-                            </td>
-                            <td className="p-3 text-right">
-                              <div className="inline-flex items-center gap-1.5">
-                                <button
-                                  onClick={() => handleOpenEdit(p)}
-                                  className="p-1.5 text-stone-600 hover:text-amber-800 hover:bg-amber-100/60 rounded-lg transition-colors"
-                                  title="Edit product"
-                                >
-                                  <Edit3 className="w-4 h-4" />
-                                </button>
-                                <button
-                                  onClick={() => handleDeleteWithConfirm(p)}
-                                  className="p-1.5 text-stone-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-colors"
-                                  title="Delete product"
-                                >
-                                  <Trash2 className="w-4 h-4" />
-                                </button>
-                              </div>
-                            </td>
-                          </tr>
-                        );
-                      })}
-                    </tbody>
-                  </table>
-                </div>
-              )}
-            </div>
+                            </div>
 
-          </div>
-        )}
+                            <div className="min-w-0 flex-1">
+                              <div className="flex items-center gap-2 flex-wrap mb-0.5">
+                                <span className="font-mono text-[11px] font-bold text-amber-800 bg-amber-50 px-1.5 py-0.2 rounded border border-amber-200">
+                                  {product.id}
+                                </span>
+                                <span className="text-[11px] text-stone-500 font-medium">
+                                  {product.category}
+                                </span>
+                                {product.video && (
+                                  <span className="text-[10px] text-indigo-700 bg-indigo-50 px-1 rounded font-medium flex items-center gap-0.5">
+                                    <Video className="w-2.5 h-2.5" /> Video Available
+                                  </span>
+                                )}
+                              </div>
+
+                              <h4 className="text-xs sm:text-sm font-bold text-stone-900 truncate">
+                                {product.name}
+                              </h4>
+
+                              <div className="flex items-center gap-3 text-[11px] text-stone-500 mt-0.5">
+                                <span className="font-semibold text-stone-800">
+                                  Rs. {(Number(product.salePrice) || Number(product.price) || 0).toLocaleString()}
+                                </span>
+                                {product.price > product.salePrice && (
+                                  <span className="line-through text-stone-400">
+                                    Rs. {(Number(product.price) || 0).toLocaleString()}
+                                  </span>
+                                )}
+                                <span className={isOutOfStock ? "text-red-600 font-bold" : "text-emerald-700 font-medium"}>
+                                  Stock: {product.stock}
+                                </span>
+                                <span className="text-amber-600 flex items-center gap-0.5 font-medium">
+                                  <Star className="w-3 h-3 fill-current" /> {product.rating ?? 5.0} ({product.reviews?.length || product.reviewsCount || 1})
+                                </span>
+                              </div>
+                            </div>
+                          </div>
+
+                          {/* Right: Actions */}
+                          <div className="flex items-center gap-1.5 self-end sm:self-center shrink-0">
+                            {/* Copy Link */}
+                            <button
+                              type="button"
+                              onClick={() => handleCopyLink(product)}
+                              className="text-xs text-stone-600 hover:text-stone-900 bg-white hover:bg-stone-100 border border-stone-200 px-2.5 py-1.5 rounded-lg transition-colors flex items-center gap-1 shadow-2xs font-medium cursor-pointer"
+                              title="Copy unique product link"
+                            >
+                              <Copy className="w-3.5 h-3.5 text-stone-500" />
+                              <span className="hidden sm:inline">Copy Product Link</span>
+                              <span className="sm:hidden">Copy</span>
+                            </button>
+
+                            {/* Edit */}
+                            <button
+                              type="button"
+                              onClick={() => handleOpenEdit(product)}
+                              className="text-xs text-amber-800 hover:text-amber-900 bg-amber-50 hover:bg-amber-100 border border-amber-200 px-2.5 py-1.5 rounded-lg transition-colors flex items-center gap-1 shadow-2xs font-semibold cursor-pointer"
+                              title="Edit product"
+                            >
+                              <Edit3 className="w-3.5 h-3.5" />
+                              <span>Edit</span>
+                            </button>
+
+                            {/* Delete */}
+                            <button
+                              type="button"
+                              onClick={() => setProductToDelete(product)}
+                              className="text-xs text-red-600 hover:text-red-700 bg-red-50 hover:bg-red-100 border border-red-200 px-2.5 py-1.5 rounded-lg transition-colors flex items-center gap-1 shadow-2xs font-semibold cursor-pointer"
+                              title="Delete product"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                              <span>Delete</span>
+                            </button>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* Footer */}
+        <div className="p-3 sm:px-6 bg-stone-100 border-t border-stone-200 flex items-center justify-between text-xs text-stone-500 shrink-0">
+          <span>Batool Market E-Commerce</span>
+          <button
+            type="button"
+            onClick={onClose}
+            className="text-xs font-semibold text-stone-700 hover:text-stone-950 px-3 py-1 bg-white border border-stone-300 rounded-lg cursor-pointer"
+          >
+            Back to Store
+          </button>
+        </div>
 
       </div>
 
       {/* ========================================================================= */}
-      {/* ADD / EDIT PRODUCT MODAL */}
+      {/* 1. SIMPLE & CLEAN ADD / EDIT PRODUCT MODAL */}
       {/* ========================================================================= */}
       {isFormOpen && editingProduct && (
-        <div className="fixed inset-0 z-60 overflow-y-auto bg-stone-900/60 backdrop-blur-xs flex items-center justify-center p-3 sm:p-6 animate-in fade-in duration-150">
-          <div className="relative bg-[#FAF9F5] border border-stone-300 w-full max-w-2xl rounded-2xl sm:rounded-3xl shadow-2xl overflow-hidden my-6">
+        <div className="fixed inset-0 z-60 overflow-y-auto bg-stone-950/80 backdrop-blur-xs flex items-center justify-center p-2 sm:p-4 animate-in fade-in duration-200">
+          <div className="bg-[#FAF9F5] border border-stone-300 w-full max-w-3xl rounded-2xl sm:rounded-3xl shadow-2xl overflow-hidden flex flex-col max-h-[92vh]">
             
-            <div className="p-4 sm:p-5 bg-white border-b border-stone-200 flex items-center justify-between">
-              <h3 className="font-serif text-lg font-bold text-stone-900">
-                {editingProduct.id && products.some(p => p.id === editingProduct.id) ? 'Edit Product' : 'Add New Product'}
+            {/* Modal Header */}
+            <div className="bg-stone-900 text-white px-5 py-3.5 flex items-center justify-between shrink-0">
+              <h3 className="font-serif text-base sm:text-lg font-bold flex items-center gap-2">
+                <Sparkles className="w-4 h-4 text-amber-400" />
+                <span>{editingProduct.createdAt ? 'Edit Product' : 'Add New Product'}</span>
               </h3>
               <button
+                type="button"
                 onClick={() => setIsFormOpen(false)}
-                className="p-1.5 text-stone-400 hover:text-stone-800 rounded-full"
+                className="text-stone-400 hover:text-white p-1 cursor-pointer"
               >
                 <X className="w-5 h-5" />
               </button>
             </div>
 
-            <form onSubmit={handleFormSubmit} className="p-5 sm:p-6 space-y-4 max-h-[80vh] overflow-y-auto text-xs">
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            {/* Form Error Banner */}
+            {formError && (
+              <div className="bg-red-50 border-b border-red-200 px-5 py-2.5 text-xs text-red-700 flex items-center gap-2 shrink-0">
+                <AlertCircle className="w-4 h-4 shrink-0" />
+                <span>{formError}</span>
+              </div>
+            )}
+
+            {/* Form Body */}
+            <form onSubmit={handleFormSubmit} className="flex-1 overflow-y-auto p-4 sm:p-6 space-y-4 text-xs">
+              {/* Row 1: Product Name & Category */}
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                <div className="sm:col-span-2">
+                  <label className="block font-bold text-stone-700 uppercase tracking-wider mb-1">
+                    Product Name <span className="text-red-600">*</span>
+                  </label>
+                  <input
+                    type="text"
+                    required
+                    value={editingProduct.name || ''}
+                    onChange={(e) => setEditingProduct({ ...editingProduct, name: e.target.value })}
+                    placeholder="e.g., Luxury Organza Embroidered 3-Piece"
+                    className="w-full text-xs sm:text-sm px-3 py-2 rounded-xl border border-stone-300 bg-white focus:outline-none focus:ring-1 focus:ring-amber-600"
+                  />
+                </div>
+
                 <div>
-                  <label className="block font-bold text-stone-700 mb-1">Product ID *</label>
+                  <label className="block font-bold text-stone-700 uppercase tracking-wider mb-1">
+                    Category <span className="text-red-600">*</span>
+                  </label>
+                  <select
+                    value={editingProduct.category || 'Cosmetics'}
+                    onChange={(e) => setEditingProduct({ ...editingProduct, category: e.target.value as CategoryName })}
+                    className="w-full text-xs px-3 py-2 rounded-xl border border-stone-300 bg-white focus:outline-none focus:ring-1 focus:ring-amber-600"
+                  >
+                    {EXACT_CATEGORIES.map((cat: string) => (
+                      <option key={cat} value={cat}>{cat}</option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+
+              {/* Row 2: Price, Sale Price, Stock, Product ID */}
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                <div>
+                  <label className="block font-bold text-stone-700 uppercase tracking-wider mb-1">
+                    Price (PKR) <span className="text-red-600">*</span>
+                  </label>
+                  <input
+                    type="number"
+                    min="0"
+                    required
+                    value={editingProduct.price ?? ''}
+                    onChange={(e) => setEditingProduct({ ...editingProduct, price: Number(e.target.value) })}
+                    placeholder="2500"
+                    className="w-full text-xs px-3 py-2 rounded-xl border border-stone-300 bg-white focus:outline-none focus:ring-1 focus:ring-amber-600"
+                  />
+                </div>
+
+                <div>
+                  <label className="block font-bold text-stone-700 uppercase tracking-wider mb-1">
+                    Discount Price (PKR)
+                  </label>
+                  <input
+                    type="number"
+                    min="0"
+                    value={editingProduct.salePrice ?? ''}
+                    onChange={(e) => setEditingProduct({ ...editingProduct, salePrice: Number(e.target.value) })}
+                    placeholder="Optional sale price"
+                    className="w-full text-xs px-3 py-2 rounded-xl border border-stone-300 bg-white focus:outline-none focus:ring-1 focus:ring-amber-600"
+                  />
+                </div>
+
+                <div>
+                  <label className="block font-bold text-stone-700 uppercase tracking-wider mb-1">
+                    Stock Quantity <span className="text-red-600">*</span>
+                  </label>
+                  <input
+                    type="number"
+                    min="0"
+                    required
+                    value={editingProduct.stock ?? ''}
+                    onChange={(e) => setEditingProduct({ ...editingProduct, stock: Number(e.target.value) })}
+                    placeholder="10"
+                    className="w-full text-xs px-3 py-2 rounded-xl border border-stone-300 bg-white focus:outline-none focus:ring-1 focus:ring-amber-600"
+                  />
+                </div>
+
+                <div>
+                  <label className="block font-bold text-stone-700 uppercase tracking-wider mb-1">
+                    Product ID / SKU <span className="text-red-600">*</span>
+                  </label>
                   <input
                     type="text"
                     required
                     value={editingProduct.id || ''}
                     onChange={(e) => setEditingProduct({ ...editingProduct, id: e.target.value })}
-                    placeholder="e.g. BM001"
-                    className="w-full p-2.5 bg-white rounded-xl border border-stone-300 focus:outline-none focus:border-amber-600 font-mono"
-                  />
-                </div>
-                <div>
-                  <label className="block font-bold text-stone-700 mb-1">SKU (Optional)</label>
-                  <input
-                    type="text"
-                    value={editingProduct.sku || ''}
-                    onChange={(e) => setEditingProduct({ ...editingProduct, sku: e.target.value })}
-                    placeholder="e.g. BM-LIP-01"
-                    className="w-full p-2.5 bg-white rounded-xl border border-stone-300 focus:outline-none focus:border-amber-600 font-mono"
+                    placeholder="BM001"
+                    className="w-full text-xs font-mono px-3 py-2 rounded-xl border border-stone-300 bg-white focus:outline-none focus:ring-1 focus:ring-amber-600"
                   />
                 </div>
               </div>
 
+              {/* Row 3: Description */}
               <div>
-                <label className="block font-bold text-stone-700 mb-1">Product Name *</label>
-                <input
-                  type="text"
-                  required
-                  value={editingProduct.name || ''}
-                  onChange={(e) => setEditingProduct({ ...editingProduct, name: e.target.value })}
-                  placeholder="e.g. Velvet Matte Long-Wear Lipstick"
-                  className="w-full p-2.5 bg-white rounded-xl border border-stone-300 focus:outline-none focus:border-amber-600"
-                />
-              </div>
-
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                <div>
-                  <label className="block font-bold text-stone-700 mb-1">Category *</label>
-                  <select
-                    value={editingProduct.category || 'Other'}
-                    onChange={(e) => setEditingProduct({ ...editingProduct, category: e.target.value as CategoryName })}
-                    className="w-full p-2.5 bg-white rounded-xl border border-stone-300 focus:outline-none focus:border-amber-600 cursor-pointer"
-                  >
-                    {EXACT_CATEGORIES.map(cat => (
-                      <option key={cat} value={cat}>{cat}</option>
-                    ))}
-                  </select>
-                </div>
-                <div>
-                  <label className="block font-bold text-stone-700 mb-1">Stock Quantity *</label>
-                  <input
-                    type="number"
-                    min="0"
-                    required
-                    value={editingProduct.stock ?? 10}
-                    onChange={(e) => setEditingProduct({ ...editingProduct, stock: parseInt(e.target.value) || 0 })}
-                    className="w-full p-2.5 bg-white rounded-xl border border-stone-300 focus:outline-none focus:border-amber-600"
-                  />
-                </div>
-              </div>
-
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                <div>
-                  <label className="block font-bold text-stone-700 mb-1">Original Price (PKR) *</label>
-                  <input
-                    type="number"
-                    min="0"
-                    required
-                    value={editingProduct.price ?? 2500}
-                    onChange={(e) => setEditingProduct({ ...editingProduct, price: parseFloat(e.target.value) || 0 })}
-                    className="w-full p-2.5 bg-white rounded-xl border border-stone-300 focus:outline-none focus:border-amber-600"
-                  />
-                </div>
-                <div>
-                  <label className="block font-bold text-stone-700 mb-1">Sale Price (PKR) *</label>
-                  <input
-                    type="number"
-                    min="0"
-                    required
-                    value={editingProduct.salePrice ?? 1999}
-                    onChange={(e) => setEditingProduct({ ...editingProduct, salePrice: parseFloat(e.target.value) || 0 })}
-                    className="w-full p-2.5 bg-white rounded-xl border border-stone-300 focus:outline-none focus:border-amber-600"
-                  />
-                </div>
-              </div>
-
-              {/* Image Input & Preview */}
-              <div>
-                <label className="block font-bold text-stone-700 mb-1">Primary Image URL or Local Upload</label>
-                <div className="flex gap-2">
-                  <input
-                    type="text"
-                    value={editingProduct.image || ''}
-                    onChange={(e) => setEditingProduct({ ...editingProduct, image: e.target.value })}
-                    placeholder="https://... image URL"
-                    className="flex-1 p-2.5 bg-white rounded-xl border border-stone-300 focus:outline-none focus:border-amber-600"
-                  />
-                  <label className="bg-stone-100 hover:bg-stone-200 text-stone-700 px-3 py-2.5 rounded-xl border border-stone-300 cursor-pointer inline-flex items-center gap-1.5 shrink-0">
-                    <Upload className="w-3.5 h-3.5" />
-                    <span>Upload</span>
-                    <input
-                      type="file"
-                      accept="image/*"
-                      onChange={handleImageFileUpload}
-                      className="hidden"
-                    />
-                  </label>
-                </div>
-                {editingProduct.image && (
-                  <div className="mt-2 w-16 h-16 rounded-lg overflow-hidden border border-stone-300 bg-white">
-                    <SafeProductImage
-                      src={editingProduct.image}
-                      alt="Preview"
-                      className="w-full h-full object-cover"
-                    />
-                  </div>
-                )}
-              </div>
-
-              {/* Multiple Images */}
-              <div>
-                <label className="block font-bold text-stone-700 mb-1">
-                  Additional Images (One URL per line)
+                <label className="block font-bold text-stone-700 uppercase tracking-wider mb-1">
+                  Product Description
                 </label>
-                <textarea
-                  rows={2}
-                  value={extraImagesInput}
-                  onChange={(e) => setExtraImagesInput(e.target.value)}
-                  placeholder="https://... image 2&#10;https://... image 3"
-                  className="w-full p-2.5 bg-white rounded-xl border border-stone-300 focus:outline-none focus:border-amber-600 font-mono text-[11px]"
-                />
-              </div>
-
-              {/* Description */}
-              <div>
-                <label className="block font-bold text-stone-700 mb-1">Product Description</label>
                 <textarea
                   rows={3}
                   value={editingProduct.description || ''}
                   onChange={(e) => setEditingProduct({ ...editingProduct, description: e.target.value })}
-                  placeholder="Detailed product information, specifications, fabric, usage..."
-                  className="w-full p-2.5 bg-white rounded-xl border border-stone-300 focus:outline-none focus:border-amber-600 leading-relaxed"
+                  placeholder="Describe material, quality, features, guarantees, packaging..."
+                  className="w-full text-xs px-3 py-2 rounded-xl border border-stone-300 bg-white focus:outline-none focus:ring-1 focus:ring-amber-600"
                 />
               </div>
 
-              {/* Toggles */}
-              <div className="grid grid-cols-2 gap-4 pt-2 border-t border-stone-200">
-                <label className="flex items-center gap-2 cursor-pointer">
+              {/* Row 4: Optional Sizes & Colors */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 bg-white p-3 rounded-xl border border-stone-200">
+                <div>
+                  <label className="block font-bold text-stone-700 uppercase tracking-wider mb-1 flex items-center gap-1">
+                    <Layers className="w-3.5 h-3.5 text-amber-700" />
+                    <span>Sizes (Optional, comma separated)</span>
+                  </label>
+                  <input
+                    type="text"
+                    value={sizesInput}
+                    onChange={(e) => setSizesInput(e.target.value)}
+                    placeholder="Small, Medium, Large, XL"
+                    className="w-full text-xs px-3 py-1.5 rounded-lg border border-stone-300 focus:outline-none focus:ring-1 focus:ring-amber-600"
+                  />
+                </div>
+
+                <div>
+                  <label className="block font-bold text-stone-700 uppercase tracking-wider mb-1 flex items-center gap-1">
+                    <Palette className="w-3.5 h-3.5 text-amber-700" />
+                    <span>Colors (Optional, comma separated)</span>
+                  </label>
+                  <input
+                    type="text"
+                    value={colorsInput}
+                    onChange={(e) => setColorsInput(e.target.value)}
+                    placeholder="Black, Maroon, Gold, Emerald"
+                    className="w-full text-xs px-3 py-1.5 rounded-lg border border-stone-300 focus:outline-none focus:ring-1 focus:ring-amber-600"
+                  />
+                </div>
+              </div>
+
+              {/* Row 5: UNLIMITED PRODUCT IMAGES (UPLOAD MULTIPLE, PREVIEW, REMOVE, SET MAIN) */}
+              <div className="bg-white p-4 rounded-xl border border-stone-200 space-y-3">
+                <div className="flex items-center justify-between">
+                  <label className="font-bold text-stone-800 uppercase tracking-wider flex items-center gap-1.5 text-xs">
+                    <ImageIcon className="w-4 h-4 text-amber-700" />
+                    <span>Product Images (Multiple Image Upload)</span>
+                  </label>
+                  <span className="text-[11px] text-stone-500">
+                    {imageItems.length} {imageItems.length === 1 ? 'image' : 'images'} added
+                  </span>
+                </div>
+
+                {/* Upload Buttons and URL Input */}
+                <div className="flex flex-col sm:flex-row gap-2">
+                  <button
+                    type="button"
+                    onClick={() => fileInputRef.current?.click()}
+                    className="bg-stone-900 hover:bg-stone-800 text-white px-3.5 py-2 rounded-xl font-semibold flex items-center justify-center gap-1.5 shrink-0 transition-all shadow-xs cursor-pointer"
+                  >
+                    <Upload className="w-3.5 h-3.5" />
+                    <span>Upload Image Files (Multiple)</span>
+                  </button>
+
+                  <input
+                    ref={fileInputRef}
+                    type="file"
+                    multiple
+                    accept="image/*"
+                    onChange={handleImageFilesSelected}
+                    className="hidden"
+                  />
+
+                  <div className="flex-1 flex gap-2">
+                    <input
+                      type="url"
+                      placeholder="Or paste image URL..."
+                      value={newImageUrlInput}
+                      onChange={(e) => setNewImageUrlInput(e.target.value)}
+                      className="flex-1 text-xs px-3 py-1.5 rounded-xl border border-stone-300 focus:outline-none focus:ring-1 focus:ring-amber-600"
+                    />
+                    <button
+                      type="button"
+                      onClick={handleAddImageUrl}
+                      className="bg-stone-200 hover:bg-stone-300 text-stone-800 px-3 py-1.5 rounded-xl font-semibold shrink-0 cursor-pointer"
+                    >
+                      Add URL
+                    </button>
+                  </div>
+                </div>
+
+                {/* Previews Grid */}
+                {imageItems.length > 0 ? (
+                  <div className="grid grid-cols-3 sm:grid-cols-5 gap-2.5 pt-2">
+                    {imageItems.map((item, idx) => {
+                      const isMain = selectedMainImageIndex === idx;
+                      return (
+                        <div
+                          key={item.id}
+                          className={`group relative aspect-square rounded-xl overflow-hidden border-2 transition-all bg-[#F5F2EA] ${
+                            isMain
+                              ? 'border-amber-700 ring-2 ring-amber-700/20 shadow-sm'
+                              : 'border-stone-200'
+                          }`}
+                        >
+                          <SafeProductImage
+                            src={item.previewUrl}
+                            alt={`Preview ${idx + 1}`}
+                            className="w-full h-full object-cover"
+                          />
+
+                          {/* Main badge */}
+                          {isMain && (
+                            <span className="absolute top-1 left-1 bg-amber-700 text-white text-[9px] font-bold px-1.5 py-0.5 rounded shadow-xs">
+                              MAIN
+                            </span>
+                          )}
+
+                          {/* Hover action overlay */}
+                          <div className="absolute inset-0 bg-stone-950/60 opacity-0 group-hover:opacity-100 transition-opacity flex flex-col items-center justify-center gap-1 p-1">
+                            {!isMain && (
+                              <button
+                                type="button"
+                                onClick={() => setSelectedMainImageIndex(idx)}
+                                className="text-[10px] bg-white text-stone-900 font-bold px-2 py-0.5 rounded shadow-xs hover:bg-amber-100 cursor-pointer"
+                              >
+                                Set Main
+                              </button>
+                            )}
+                            <button
+                              type="button"
+                              onClick={() => handleRemoveImage(idx)}
+                              className="text-[10px] bg-red-600 text-white font-bold px-2 py-0.5 rounded shadow-xs hover:bg-red-700 cursor-pointer"
+                            >
+                              Remove
+                            </button>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                ) : (
+                  <p className="text-stone-400 text-[11px] italic bg-stone-50 p-2.5 rounded-xl text-center border border-dashed border-stone-200">
+                    No images added yet. Upload files or paste URLs above.
+                  </p>
+                )}
+              </div>
+
+              {/* Row 6: PRODUCT VIDEO (UPLOAD OR URL, EMBEDDED STREAMING, PREVIEW) */}
+              <div className="bg-white p-4 rounded-xl border border-stone-200 space-y-3">
+                <div className="flex items-center justify-between">
+                  <label className="font-bold text-stone-800 uppercase tracking-wider flex items-center gap-1.5 text-xs">
+                    <Video className="w-4 h-4 text-amber-700" />
+                    <span>Product Video (Optional)</span>
+                  </label>
+                  <span className="text-[11px] text-stone-500">
+                    Protected playback on product page
+                  </span>
+                </div>
+
+                <div className="flex flex-col sm:flex-row gap-2">
+                  <button
+                    type="button"
+                    onClick={() => videoFileInputRef.current?.click()}
+                    className="bg-stone-900 hover:bg-stone-800 text-white px-3.5 py-2 rounded-xl font-semibold flex items-center justify-center gap-1.5 shrink-0 transition-all shadow-xs cursor-pointer"
+                  >
+                    <Upload className="w-3.5 h-3.5" />
+                    <span>Upload Video File (MP4/WebM)</span>
+                  </button>
+
+                  <input
+                    ref={videoFileInputRef}
+                    type="file"
+                    accept="video/*"
+                    onChange={handleVideoFileSelected}
+                    className="hidden"
+                  />
+
+                  <div className="flex-1 flex gap-2">
+                    <input
+                      type="url"
+                      placeholder="Or paste streaming video URL (MP4, Cloudinary)..."
+                      value={videoUrlInput}
+                      onChange={(e) => {
+                        setVideoUrlInput(e.target.value);
+                        setVideoPreviewUrl(e.target.value);
+                        setVideoFile(null);
+                        setVideoPreviewError(false);
+                      }}
+                      className="flex-1 text-xs px-3 py-1.5 rounded-xl border border-stone-300 focus:outline-none focus:ring-1 focus:ring-amber-600"
+                    />
+                    {videoPreviewUrl && (
+                      <button
+                        type="button"
+                        onClick={handleRemoveVideo}
+                        className="bg-red-50 text-red-600 hover:bg-red-100 px-3 py-1.5 rounded-xl font-semibold shrink-0 cursor-pointer"
+                      >
+                        Remove
+                      </button>
+                    )}
+                  </div>
+                </div>
+
+                {/* Video Preview */}
+                {videoPreviewUrl && (
+                  <div className="mt-2 p-2 bg-stone-900 rounded-xl max-w-sm">
+                    <video
+                      src={videoPreviewUrl}
+                      controls
+                      controlsList="nodownload nofullscreen noremoteplayback"
+                      disablePictureInPicture
+                      onContextMenu={(e) => e.preventDefault()}
+                      onError={() => setVideoPreviewError(true)}
+                      className="w-full max-h-48 rounded-lg object-contain bg-black"
+                      playsInline
+                    />
+                    {videoPreviewError && (
+                      <p className="text-red-400 text-[10px] mt-1">
+                        Could not load video preview. Please verify URL format.
+                      </p>
+                    )}
+                  </div>
+                )}
+              </div>
+
+              {/* Row 7: Rating & Reviews Management */}
+              <div className="bg-white p-4 rounded-xl border border-stone-200 space-y-3">
+                <div className="flex items-center justify-between">
+                  <label className="font-bold text-stone-800 uppercase tracking-wider flex items-center gap-1.5 text-xs">
+                    <Star className="w-4 h-4 text-amber-500 fill-amber-500" />
+                    <span>Rating & Reviews Management</span>
+                  </label>
+                  <div className="flex items-center gap-2">
+                    <span className="text-[11px] text-stone-500">Displayed Rating:</span>
+                    <select
+                      value={editingProduct.rating ?? 5.0}
+                      onChange={(e) => setEditingProduct({ ...editingProduct, rating: Number(e.target.value) })}
+                      className="text-xs px-2 py-1 rounded border border-stone-300 bg-stone-50"
+                    >
+                      <option value={5.0}>5.0 ⭐⭐⭐⭐⭐</option>
+                      <option value={4.8}>4.8 ⭐⭐⭐⭐⭐</option>
+                      <option value={4.5}>4.5 ⭐⭐⭐⭐</option>
+                      <option value={4.0}>4.0 ⭐⭐⭐⭐</option>
+                      <option value={3.5}>3.5 ⭐⭐⭐</option>
+                    </select>
+                  </div>
+                </div>
+
+                {/* List existing reviews with delete button for admin */}
+                {productReviews.length > 0 ? (
+                  <div className="space-y-1.5 max-h-32 overflow-y-auto">
+                    {productReviews.map((rev, rIdx) => (
+                      <div key={rev.id || rIdx} className="flex items-center justify-between bg-stone-50 p-2 rounded-lg border border-stone-200 text-[11px]">
+                        <div>
+                          <span className="font-bold text-stone-800">{rev.author}</span>
+                          <span className="text-amber-600 font-bold ml-1.5">({rev.rating}★)</span>:
+                          <span className="text-stone-600 ml-1 italic">"{rev.comment}"</span>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => setProductReviews(prev => prev.filter((_, idx) => idx !== rIdx))}
+                          className="text-red-600 hover:text-red-800 text-[10px] font-semibold ml-2 cursor-pointer"
+                        >
+                          Delete
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="text-stone-400 text-[11px] italic">
+                    No customer reviews on this product yet.
+                  </p>
+                )}
+              </div>
+
+              {/* Row 8: Flags */}
+              <div className="flex items-center gap-6 pt-1">
+                <label className="flex items-center gap-2 cursor-pointer font-semibold text-stone-800">
                   <input
                     type="checkbox"
-                    checked={!!editingProduct.featured}
+                    checked={Boolean(editingProduct.featured)}
                     onChange={(e) => setEditingProduct({ ...editingProduct, featured: e.target.checked })}
-                    className="w-4 h-4 accent-amber-700 rounded"
+                    className="rounded text-amber-700 focus:ring-amber-600"
                   />
-                  <span className="font-semibold text-stone-800">Featured Product</span>
+                  <span>Featured Product</span>
                 </label>
-                <label className="flex items-center gap-2 cursor-pointer">
+
+                <label className="flex items-center gap-2 cursor-pointer font-semibold text-stone-800">
                   <input
                     type="checkbox"
-                    checked={!!editingProduct.newArrival}
+                    checked={Boolean(editingProduct.newArrival)}
                     onChange={(e) => setEditingProduct({ ...editingProduct, newArrival: e.target.checked })}
-                    className="w-4 h-4 accent-amber-700 rounded"
+                    className="rounded text-amber-700 focus:ring-amber-600"
                   />
-                  <span className="font-semibold text-stone-800">New Arrival</span>
+                  <span>New Arrival</span>
                 </label>
               </div>
 
-              {/* Buttons */}
-              <div className="pt-4 border-t border-stone-200 flex justify-end gap-3">
+              {/* Actions Footer inside modal */}
+              <div className="pt-4 border-t border-stone-200 flex items-center justify-end gap-3">
                 <button
                   type="button"
                   onClick={() => setIsFormOpen(false)}
-                  className="px-4 py-2 bg-stone-100 hover:bg-stone-200 text-stone-700 rounded-xl font-semibold"
+                  className="px-4 py-2 rounded-xl text-stone-700 bg-stone-100 hover:bg-stone-200 font-semibold cursor-pointer"
                 >
                   Cancel
                 </button>
                 <button
                   type="submit"
-                  className="px-5 py-2 bg-[#181816] hover:bg-stone-800 text-white rounded-xl font-bold flex items-center gap-1.5"
+                  disabled={isSaving}
+                  className="px-6 py-2 rounded-xl text-white bg-amber-700 hover:bg-amber-800 font-semibold shadow-md flex items-center gap-2 disabled:opacity-50 cursor-pointer"
                 >
-                  <Save className="w-4 h-4" />
-                  <span>Save Product</span>
+                  {isSaving ? (
+                    <>
+                      <RefreshCw className="w-4 h-4 animate-spin" />
+                      <span>{saveStatusText}</span>
+                    </>
+                  ) : (
+                    <>
+                      <Save className="w-4 h-4" />
+                      <span>Save Product</span>
+                    </>
+                  )}
                 </button>
               </div>
             </form>
+
           </div>
         </div>
       )}
 
       {/* ========================================================================= */}
-      {/* BULK IMPORT MODAL (Upload, Preview, Confirm, Report) */}
+      {/* 2. CONFIRM DELETE MODAL */}
       {/* ========================================================================= */}
-      {isImportModalOpen && (
-        <div className="fixed inset-0 z-60 overflow-y-auto bg-stone-900/60 backdrop-blur-xs flex items-center justify-center p-3 sm:p-6 animate-in fade-in duration-150">
-          <div className="relative bg-[#FAF9F5] border border-stone-300 w-full max-w-4xl rounded-2xl sm:rounded-3xl shadow-2xl overflow-hidden my-6 flex flex-col max-h-[90vh]">
-            
-            {/* Modal Header */}
-            <div className="p-4 sm:p-5 bg-white border-b border-stone-200 flex items-center justify-between">
-              <div>
-                <h3 className="font-serif text-lg sm:text-xl font-bold text-stone-900">
-                  Bulk Product Import (CSV / Excel)
-                </h3>
-                <p className="text-xs text-stone-500">
-                  Import your complete catalogue automatically into Batool Market.
-                </p>
+      {productToDelete && (
+        <div className="fixed inset-0 z-70 bg-stone-950/80 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl p-6 max-w-md w-full border border-stone-200 shadow-2xl space-y-4">
+            <div className="flex items-center gap-3 text-red-600">
+              <div className="w-10 h-10 rounded-full bg-red-100 flex items-center justify-center shrink-0">
+                <Trash2 className="w-5 h-5" />
               </div>
+              <h4 className="font-serif text-lg font-bold text-stone-900">
+                Delete Product
+              </h4>
+            </div>
+
+            <p className="text-xs sm:text-sm text-stone-600 leading-relaxed">
+              Are you sure you want to delete <span className="font-bold text-stone-900">"{productToDelete.name}"</span> ({productToDelete.id})? This will remove it from the shared cloud database for all customers.
+            </p>
+
+            <div className="flex items-center justify-end gap-3 pt-2">
               <button
-                onClick={() => setIsImportModalOpen(false)}
-                className="p-1.5 text-stone-400 hover:text-stone-800 rounded-full"
+                type="button"
+                onClick={() => setProductToDelete(null)}
+                className="px-4 py-2 rounded-xl text-stone-600 bg-stone-100 hover:bg-stone-200 font-semibold text-xs cursor-pointer"
               >
-                <X className="w-5 h-5" />
+                Cancel
+              </button>
+              <button
+                type="button"
+                disabled={isDeleting}
+                onClick={handleConfirmDelete}
+                className="px-5 py-2 rounded-xl bg-red-600 hover:bg-red-700 text-white font-semibold text-xs shadow-md flex items-center gap-1.5 disabled:opacity-50 cursor-pointer"
+              >
+                {isDeleting ? (
+                  <>
+                    <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                    <span>Deleting...</span>
+                  </>
+                ) : (
+                  <>
+                    <Trash2 className="w-3.5 h-3.5" />
+                    <span>Confirm Delete</span>
+                  </>
+                )}
               </button>
             </div>
-
-            {/* Modal Body */}
-            <div className="flex-1 overflow-y-auto p-4 sm:p-6">
-              
-              {/* STEP 1: Upload */}
-              {importStep === 'upload' && (
-                <div className="space-y-6 max-w-xl mx-auto py-6">
-                  
-                  {/* Drag/Drop & File Input */}
-                  <div className="border-2 border-dashed border-stone-300 rounded-2xl p-8 text-center bg-white space-y-4 hover:border-amber-600 transition-colors">
-                    <div className="w-16 h-16 rounded-full bg-amber-50 text-amber-800 flex items-center justify-center mx-auto">
-                      <FileSpreadsheet className="w-8 h-8" />
-                    </div>
-                    <div>
-                      <h4 className="font-serif text-base font-bold text-stone-900">
-                        Select a CSV or Excel (.xlsx) file
-                      </h4>
-                      <p className="text-xs text-stone-500 mt-1 max-w-sm mx-auto">
-                        Expected columns: Product ID, Product Name, Category, Description, Image, Original Price, Sale Price, Stock, Featured, New Arrival, SKU.
-                      </p>
-                    </div>
-
-                    <input
-                      type="file"
-                      ref={fileInputRef}
-                      accept=".csv, application/vnd.openxmlformats-officedocument.spreadsheetml.sheet, application/vnd.ms-excel"
-                      onChange={handleFileSelected}
-                      className="hidden"
-                      id="bulkImportFileInput"
-                    />
-
-                    <label
-                      htmlFor="bulkImportFileInput"
-                      className="inline-flex items-center gap-2 bg-[#181816] hover:bg-stone-800 text-white font-bold text-xs px-5 py-2.5 rounded-xl cursor-pointer shadow-xs transition-all"
-                    >
-                      <Upload className="w-4 h-4" />
-                      <span>{isReadingFile ? 'Reading file...' : 'Choose CSV / Excel File'}</span>
-                    </label>
-                  </div>
-
-                  {/* Template download banner */}
-                  <div className="bg-amber-50 rounded-2xl p-4 border border-amber-200/80 flex flex-col sm:flex-row items-center justify-between gap-3 text-xs">
-                    <div>
-                      <span className="font-bold text-amber-900 block">Need the exact Excel format?</span>
-                      <span className="text-amber-800">Download the pre-filled template with all recognized categories and headers.</span>
-                    </div>
-                    <div className="flex gap-2">
-                      <button
-                        onClick={() => downloadImportTemplate('csv')}
-                        className="bg-white hover:bg-amber-100 text-amber-900 font-bold px-3 py-1.5 rounded-lg border border-amber-300 text-xs shrink-0"
-                      >
-                        Download CSV
-                      </button>
-                      <button
-                        onClick={() => downloadImportTemplate('xlsx')}
-                        className="bg-white hover:bg-amber-100 text-amber-900 font-bold px-3 py-1.5 rounded-lg border border-amber-300 text-xs shrink-0"
-                      >
-                        Download Excel
-                      </button>
-                    </div>
-                  </div>
-
-                </div>
-              )}
-
-              {/* STEP 2: Preview & Configuration */}
-              {importStep === 'preview' && (
-                <div className="space-y-5">
-                  
-                  {/* Status Banner */}
-                  <div className="bg-white p-4 rounded-2xl border border-stone-200 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
-                    <div>
-                      <h4 className="font-serif text-base font-bold text-stone-900">
-                        {previewItems.length} products ready to import
-                      </h4>
-                      <p className="text-xs text-stone-500 mt-0.5">
-                        Please review the parsed rows and choose your import options below before confirming.
-                      </p>
-                    </div>
-
-                    <button
-                      onClick={() => setImportStep('upload')}
-                      className="text-xs text-stone-500 hover:text-stone-900 underline"
-                    >
-                      Upload a different file
-                    </button>
-                  </div>
-
-                  {/* Import Mode Options (Add vs Replace All) */}
-                  <div className="bg-white p-4 rounded-2xl border border-stone-200 space-y-4">
-                    <h5 className="font-serif text-sm font-bold text-stone-900">
-                      Import Mode
-                    </h5>
-
-                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
-                      <label className={`p-3.5 rounded-xl border-2 cursor-pointer transition-all ${
-                        importOption === 'add' ? 'border-amber-700 bg-amber-50/50' : 'border-stone-200 hover:border-stone-300'
-                      }`}>
-                        <div className="flex items-center gap-2 font-bold text-stone-900 mb-1">
-                          <input
-                            type="radio"
-                            name="importOption"
-                            value="add"
-                            checked={importOption === 'add'}
-                            onChange={() => {
-                              setImportOption('add');
-                              setIsConfirmingReplace(false);
-                            }}
-                            className="accent-amber-700"
-                          />
-                          <span>Option A — Add Products</span>
-                        </div>
-                        <p className="text-stone-600 text-[11px] pl-5">
-                          Keep existing products and add the newly imported products to the catalogue.
-                        </p>
-                      </label>
-
-                      <label className={`p-3.5 rounded-xl border-2 cursor-pointer transition-all ${
-                        importOption === 'replace' ? 'border-red-600 bg-red-50/50' : 'border-stone-200 hover:border-stone-300'
-                      }`}>
-                        <div className="flex items-center gap-2 font-bold text-red-900 mb-1">
-                          <input
-                            type="radio"
-                            name="importOption"
-                            value="replace"
-                            checked={importOption === 'replace'}
-                            onChange={() => setImportOption('replace')}
-                            className="accent-red-600"
-                          />
-                          <span>Option B — Replace All Products</span>
-                        </div>
-                        <p className="text-stone-600 text-[11px] pl-5">
-                          Permanently delete all existing/sample products and replace them with the imported catalogue.
-                        </p>
-                      </label>
-                    </div>
-
-                    {/* Duplicate resolution rule if 'add' */}
-                    {importOption === 'add' && (
-                      <div className="pt-2 border-t border-stone-100 flex items-center justify-between text-xs">
-                        <span className="font-semibold text-stone-700">If a Product ID already exists:</span>
-                        <div className="flex items-center gap-4">
-                          <label className="flex items-center gap-1.5 cursor-pointer">
-                            <input
-                              type="radio"
-                              name="dupRes"
-                              checked={duplicateResolution === 'update'}
-                              onChange={() => setDuplicateResolution('update')}
-                              className="accent-amber-700"
-                            />
-                            <span>Update existing product</span>
-                          </label>
-                          <label className="flex items-center gap-1.5 cursor-pointer">
-                            <input
-                              type="radio"
-                              name="dupRes"
-                              checked={duplicateResolution === 'skip'}
-                              onChange={() => setDuplicateResolution('skip')}
-                              className="accent-amber-700"
-                            />
-                            <span>Skip product</span>
-                          </label>
-                        </div>
-                      </div>
-                    )}
-                  </div>
-
-                  {/* Warning Confirmation when Replace All Products is selected */}
-                  {importOption === 'replace' && (
-                    <div className="bg-red-50 border-2 border-red-300 rounded-2xl p-4 text-xs text-red-900 space-y-2 animate-in fade-in">
-                      <div className="flex items-center gap-2 font-bold">
-                        <AlertTriangle className="w-4 h-4 text-red-600 shrink-0" />
-                        <span>Confirmation Required</span>
-                      </div>
-                      <p>
-                        “Are you sure? This will permanently remove all currently stored products and replace them with the imported catalogue.”
-                      </p>
-                      <label className="flex items-center gap-2 font-bold text-stone-900 pt-1 cursor-pointer">
-                        <input
-                          type="checkbox"
-                          checked={isConfirmingReplace}
-                          onChange={(e) => setIsConfirmingReplace(e.target.checked)}
-                          className="w-4 h-4 accent-red-600 rounded"
-                        />
-                        <span>I confirm that I want to delete all current products and import this new list.</span>
-                      </label>
-                    </div>
-                  )}
-
-                  {/* Parse Errors banner if any rows failed validation */}
-                  {importErrors.length > 0 && (
-                    <div className="bg-amber-50 border border-amber-200 rounded-2xl p-3 text-xs text-amber-900 space-y-1">
-                      <div className="font-bold flex items-center gap-1.5">
-                        <AlertCircle className="w-4 h-4 text-amber-700" />
-                        <span>{importErrors.length} row(s) had missing information and will be skipped:</span>
-                      </div>
-                      <ul className="list-disc pl-5 text-[11px] text-amber-800 space-y-0.5">
-                        {importErrors.map((err, i) => (
-                          <li key={i}>Row {err.rowNumber}: {err.message}</li>
-                        ))}
-                      </ul>
-                    </div>
-                  )}
-
-                  {/* Preview Table */}
-                  <div className="bg-white rounded-2xl border border-stone-200 overflow-hidden shadow-2xs">
-                    <div className="p-3 bg-stone-100 border-b border-stone-200 font-bold text-xs text-stone-800 flex justify-between items-center">
-                      <span>Import Preview Table ({previewItems.length} items)</span>
-                      <span className="text-[11px] font-normal text-stone-500">Broken images will fall back safely to "Image unavailable"</span>
-                    </div>
-
-                    <div className="max-h-72 overflow-y-auto">
-                      <table className="w-full text-left border-collapse text-xs">
-                        <thead className="bg-stone-50 text-stone-600 border-b border-stone-200 sticky top-0">
-                          <tr>
-                            <th className="p-2.5">Image</th>
-                            <th className="p-2.5">Product Name</th>
-                            <th className="p-2.5">Category</th>
-                            <th className="p-2.5">Original Price</th>
-                            <th className="p-2.5">Sale Price</th>
-                            <th className="p-2.5">Stock</th>
-                            <th className="p-2.5">Featured</th>
-                            <th className="p-2.5">New Arrival</th>
-                            <th className="p-2.5">Status</th>
-                          </tr>
-                        </thead>
-                        <tbody className="divide-y divide-stone-100">
-                          {previewItems.map((item, idx) => (
-                            <tr key={idx} className="hover:bg-stone-50">
-                              <td className="p-2.5">
-                                <div className="w-10 h-10 rounded-lg overflow-hidden bg-stone-100 border border-stone-200">
-                                  <SafeProductImage
-                                    src={item.image}
-                                    alt={item.name}
-                                    className="w-full h-full object-cover"
-                                  />
-                                </div>
-                              </td>
-                              <td className="p-2.5">
-                                <div className="font-bold text-stone-900 max-w-xs truncate">{item.name}</div>
-                                <div className="text-[10px] text-stone-400 font-mono">ID: {item.id}</div>
-                              </td>
-                              <td className="p-2.5">
-                                <span className="bg-stone-100 px-2 py-0.5 rounded text-[11px] text-stone-700">
-                                  {item.category}
-                                </span>
-                              </td>
-                              <td className="p-2.5 font-mono">Rs. {item.price.toLocaleString()}</td>
-                              <td className="p-2.5 font-mono font-bold text-stone-900">Rs. {item.salePrice.toLocaleString()}</td>
-                              <td className="p-2.5 font-mono">{item.stock}</td>
-                              <td className="p-2.5">{item.featured ? 'Yes' : 'No'}</td>
-                              <td className="p-2.5">{item.newArrival ? 'Yes' : 'No'}</td>
-                              <td className="p-2.5">
-                                {item.statusConflict === 'exists' ? (
-                                  <span className="text-amber-800 bg-amber-50 px-1.5 py-0.5 rounded text-[10px] font-semibold">
-                                    Product already exists
-                                  </span>
-                                ) : (
-                                  <span className="text-emerald-700 bg-emerald-50 px-1.5 py-0.5 rounded text-[10px] font-semibold">
-                                    New Item
-                                  </span>
-                                )}
-                              </td>
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
-                    </div>
-                  </div>
-
-                </div>
-              )}
-
-              {/* STEP 3: Report */}
-              {importStep === 'report' && importReport && (
-                <div className="space-y-6 max-w-lg mx-auto py-6 text-center">
-                  <div className="w-16 h-16 rounded-full bg-emerald-50 text-emerald-700 flex items-center justify-center mx-auto">
-                    <CheckCircle2 className="w-8 h-8" />
-                  </div>
-
-                  <div>
-                    <h4 className="font-serif text-xl font-bold text-stone-900">
-                      Import Complete!
-                    </h4>
-                    <p className="text-xs text-stone-500 mt-1">
-                      Your store catalogue has been updated and is immediately visible to visitors.
-                    </p>
-                  </div>
-
-                  <div className="bg-white rounded-2xl border border-stone-200 p-5 grid grid-cols-2 sm:grid-cols-4 gap-3 text-center">
-                    <div className="p-2 bg-stone-50 rounded-xl">
-                      <span className="text-xs text-stone-500 block">Created</span>
-                      <span className="font-serif text-xl font-bold text-emerald-700">{importReport.successCount}</span>
-                    </div>
-                    <div className="p-2 bg-stone-50 rounded-xl">
-                      <span className="text-xs text-stone-500 block">Updated</span>
-                      <span className="font-serif text-xl font-bold text-amber-700">{importReport.updatedCount}</span>
-                    </div>
-                    <div className="p-2 bg-stone-50 rounded-xl">
-                      <span className="text-xs text-stone-500 block">Skipped</span>
-                      <span className="font-serif text-xl font-bold text-stone-600">{importReport.skippedCount}</span>
-                    </div>
-                    <div className="p-2 bg-stone-50 rounded-xl">
-                      <span className="text-xs text-stone-500 block">Errors</span>
-                      <span className="font-serif text-xl font-bold text-red-600">{importReport.errorCount}</span>
-                    </div>
-                  </div>
-
-                  {importReport.errors.length > 0 && (
-                    <div className="text-left bg-stone-50 p-4 rounded-xl border border-stone-200 text-xs">
-                      <span className="font-bold text-stone-800 block mb-1">Issue Details:</span>
-                      <ul className="space-y-1 text-stone-600 text-[11px]">
-                        {importReport.errors.map((err, i) => (
-                          <li key={i}>• Row {err.rowNumber}: {err.message}</li>
-                        ))}
-                      </ul>
-                    </div>
-                  )}
-
-                  <button
-                    onClick={() => {
-                      setIsImportModalOpen(false);
-                      setImportStep('upload');
-                    }}
-                    className="bg-[#181816] hover:bg-stone-800 text-white font-bold text-xs px-6 py-2.5 rounded-xl shadow-xs"
-                  >
-                    Done &amp; View Products
-                  </button>
-                </div>
-              )}
-
-            </div>
-
-            {/* Footer Buttons for Step 2 (Preview) */}
-            {importStep === 'preview' && (
-              <div className="p-4 bg-white border-t border-stone-200 flex items-center justify-between gap-3">
-                <button
-                  onClick={() => setIsImportModalOpen(false)}
-                  className="px-4 py-2 bg-stone-100 hover:bg-stone-200 text-stone-700 rounded-xl text-xs font-semibold"
-                >
-                  Cancel Import
-                </button>
-
-                <button
-                  onClick={executeImport}
-                  disabled={importOption === 'replace' && !isConfirmingReplace}
-                  className={`px-6 py-2.5 text-white font-bold text-xs rounded-xl shadow-xs transition-all ${
-                    importOption === 'replace' && !isConfirmingReplace
-                      ? 'bg-stone-300 cursor-not-allowed text-stone-500'
-                      : importOption === 'replace'
-                      ? 'bg-red-600 hover:bg-red-700'
-                      : 'bg-emerald-600 hover:bg-emerald-700'
-                  }`}
-                >
-                  Confirm Import ({previewItems.length} Products)
-                </button>
-              </div>
-            )}
-
           </div>
         </div>
       )}

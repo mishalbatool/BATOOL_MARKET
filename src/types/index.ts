@@ -31,30 +31,46 @@ export type CategoryName =
   | "Electronics"
   | "Other";
 
+export interface ReviewItem {
+  id: string;
+  author: string;
+  rating: number; // 1-5
+  comment: string;
+  date: string; // YYYY-MM-DD or ISO
+}
+
 export interface Product {
-  id: string; // Unique Product ID (e.g. BM001)
+  id: string; // Unique Product ID (e.g. BM001 or custom)
   name: string; // Product Name
   category: CategoryName; // Category
-  description: string; // Product Description
+  description: string; // Full Product Description
   shortDescription?: string; // Optional short summary
-  image: string; // Primary image URL or stored Base64
-  images: string[]; // Multiple Product Images array
+  image: string; // Main primary image (URL or data URI)
+  images: string[]; // Unlimited Multiple Images array
+  video?: string | null; // Optional Product Video (URL or data URI, null if none)
   price: number; // Original Price in PKR
-  salePrice: number; // Sale Price in PKR
-  discountPercent?: number; // Calculated or specified discount percentage
-  stock: number; // Stock Quantity
+  salePrice: number; // Sale / Discount Price in PKR
+  discountPercent?: number; // Discount percentage
+  stock: number; // Quantity / Stock
   status: 'in_stock' | 'low_stock' | 'out_of_stock'; // Stock Status
+  sizes?: string[]; // Optional multiple sizes (e.g., S, M, L, XL or custom)
+  colors?: string[]; // Optional multiple colors (e.g., Black, Gold, Maroon)
   featured: boolean; // Featured Product boolean
   newArrival: boolean; // New Arrival boolean
-  rating?: number; // Product Rating (optional)
-  reviewsCount?: number; // Number of reviews (optional)
+  rating?: number; // Product Rating (1 to 5)
+  reviewsCount?: number; // Number of reviews
+  reviews?: ReviewItem[]; // Array of customer reviews
   sku?: string; // Product SKU (optional)
+  slug?: string; // Clean URL slug for /product/slug or /product/id
   createdAt?: string; // Creation timestamp
+  updatedAt?: string; // Update timestamp
 }
 
 export interface CartItem {
   product: Product;
   quantity: number;
+  selectedSize?: string;
+  selectedColor?: string;
 }
 
 export interface CustomerDetails {
@@ -74,12 +90,17 @@ export interface ImportPreviewItem {
   description: string;
   image: string;
   images: string[];
+  video?: string;
   price: number;
   salePrice: number;
   stock: number;
+  sizes?: string[];
+  colors?: string[];
   featured: boolean;
   newArrival: boolean;
   sku?: string;
+  rating?: number;
+  reviewsCount?: number;
   isValid: boolean;
   validationError?: string;
   statusConflict?: 'exists' | 'new';

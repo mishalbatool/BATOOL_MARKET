@@ -163,6 +163,20 @@ export const CartDrawer: React.FC<CartDrawerProps> = ({
                   <h4 className="text-xs font-bold text-stone-900 truncate">
                     {item.product.name}
                   </h4>
+                  {(item.selectedSize || item.selectedColor) && (
+                    <div className="flex items-center gap-1.5 mt-0.5 text-[10px] text-stone-500">
+                      {item.selectedSize && (
+                        <span className="bg-stone-100 px-1 py-0.2 rounded font-medium">
+                          Size: {item.selectedSize}
+                        </span>
+                      )}
+                      {item.selectedColor && (
+                        <span className="bg-amber-50 text-amber-800 px-1 py-0.2 rounded font-medium">
+                          {item.selectedColor}
+                        </span>
+                      )}
+                    </div>
+                  )}
                   <div className="flex items-baseline gap-2 mt-0.5">
                     <span className="text-xs font-bold text-stone-900">
                       Rs. {item.product.salePrice.toLocaleString()}

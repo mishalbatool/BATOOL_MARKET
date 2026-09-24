@@ -1,0 +1,71 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "title": "Batool Market Shared Database Blueprint",
+  "entities": {
+    "Product": {
+      "title": "Product",
+      "description": "An e-commerce product in Batool Market",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "description": "Unique product ID" },
+        "name": { "type": "string", "description": "Product name", "maxLength": 300 },
+        "category": { "type": "string", "description": "Product category" },
+        "description": { "type": "string", "description": "Full product description" },
+        "shortDescription": { "type": "string", "description": "Optional summary" },
+        "price": { "type": "number", "description": "Original price in PKR" },
+        "salePrice": { "type": "number", "description": "Discount/sale price in PKR" },
+        "discountPercent": { "type": "number", "description": "Calculated discount percentage" },
+        "stock": { "type": "number", "description": "Quantity in stock" },
+        "status": { "type": "string", "enum": ["in_stock", "low_stock", "out_of_stock"] },
+        "sizes": { "type": "array", "items": { "type": "string" }, "description": "Available product sizes" },
+        "colors": { "type": "array", "items": { "type": "string" }, "description": "Available product colors" },
+        "image": { "type": "string", "description": "Main product image URL or storage string" },
+        "images": { "type": "array", "items": { "type": "string" }, "description": "All product images" },
+        "video": { "type": "string", "description": "Optional product video URL or base64 stream" },
+        "rating": { "type": "number", "description": "Average review rating" },
+        "reviewsCount": { "type": "number", "description": "Number of reviews" },
+        "reviews": { "type": "array", "description": "Customer reviews" },
+        "featured": { "type": "boolean", "description": "Featured in store showcase" },
+        "newArrival": { "type": "boolean", "description": "Marked as new arrival" },
+        "sku": { "type": "string", "description": "Stock keeping unit" },
+        "slug": { "type": "string", "description": "Clean URL slug" },
+        "createdAt": { "type": "string", "description": "Creation timestamp ISO" },
+        "updatedAt": { "type": "string", "description": "Last updated timestamp ISO" }
+      },
+      "required": ["id", "name", "category", "price", "salePrice", "stock", "image"]
+    },
+    "Admin": {
+      "title": "Admin",
+      "description": "Authorized admin account record",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "description": "Auth UID" },
+        "email": { "type": "string", "description": "Admin email" },
+        "role": { "type": "string", "enum": ["admin"] }
+      },
+      "required": ["uid", "email", "role"]
+    },
+    "TestConnection": {
+      "title": "TestConnection",
+      "description": "Connection test ping document",
+      "type": "object",
+      "properties": {
+        "status": { "type": "string", "description": "Connection ping status" }
+      }
+    }
+  },
+  "firestore": {
+    "/products/{productId}": {
+      "schema": "Product",
+      "description": "Products catalogue visible to all shoppers, manageable by admins"
+    },
+    "/admins/{adminId}": {
+      "schema": "Admin",
+      "description": "Trusted admin users document for ABAC role authorization"
+    },
+    "/test/{docId}": {
+      "schema": "TestConnection",
+      "description": "Connection validation ping endpoint"
+    }
+  }
+}

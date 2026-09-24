@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { Product, CustomerDetails } from '../types';
 import { getSingleProductWhatsAppLink, WHATSAPP_NUMBER_DISPLAY } from '../utils/whatsapp';
 import { loadCustomerFromStorage, saveCustomerToStorage } from '../utils/storage';
+import { SafeProductImage } from './SafeProductImage';
 import { X, MessageCircle, Truck, CheckCircle2 } from 'lucide-react';
 
 interface WhatsAppOrderModalProps {
@@ -91,11 +92,13 @@ export const WhatsAppOrderModal: React.FC<WhatsAppOrderModalProps> = ({
         <div className="p-5 space-y-4 max-h-[78vh] overflow-y-auto">
           {/* Product Summary Row */}
           <div className="flex items-center gap-3 bg-white p-3 rounded-xl border border-stone-200 shadow-2xs">
-            <img
-              src={product.image}
-              alt={product.name}
-              className="w-16 h-16 object-cover rounded-lg border border-stone-100 shrink-0"
-            />
+            <div className="w-16 h-16 rounded-lg overflow-hidden border border-stone-100 shrink-0 bg-[#F5F2EA]">
+              <SafeProductImage
+                src={product.image}
+                alt={product.name}
+                className="w-full h-full object-cover"
+              />
+            </div>
             <div className="flex-1 min-w-0">
               <p className="text-[11px] text-amber-700 font-semibold">{product.category}</p>
               <h4 className="text-xs sm:text-sm font-bold text-stone-900 truncate">{product.name}</h4>

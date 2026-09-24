@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { ShoppingBag, Search, Menu, X, MessageCircle, ArrowRight, ShieldCheck } from 'lucide-react';
+import { ShoppingBag, Search, Menu, X, MessageCircle, ArrowRight, ShieldCheck, Lock } from 'lucide-react';
 import { ActivePage, CategoryName } from '../types';
 import { WHATSAPP_NUMBER_DISPLAY } from '../utils/whatsapp';
 import { Logo } from './Logo';
@@ -184,6 +184,16 @@ export const Header: React.FC<HeaderProps> = ({
                   {cartCount > 99 ? '99+' : cartCount}
                 </span>
               )}
+            </button>
+
+            {/* Store Admin Portal Access Button */}
+            <button
+              onClick={onOpenAdmin}
+              className="inline-flex items-center gap-1.5 text-xs font-semibold px-3 py-1.5 rounded-full border border-stone-300 hover:border-amber-600 bg-stone-50 hover:bg-amber-50 text-stone-700 hover:text-amber-900 transition-colors shadow-2xs cursor-pointer"
+              title="Open Store Owner Admin Portal"
+            >
+              <Lock className="w-3.5 h-3.5 text-amber-700" />
+              <span className="hidden sm:inline">Admin</span>
             </button>
           </div>
         </div>
