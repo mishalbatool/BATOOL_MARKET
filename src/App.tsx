@@ -354,47 +354,6 @@ export default function App() {
   return (
     <div className="min-h-screen flex flex-col bg-[#FAF9F5] text-stone-900 selection:bg-amber-100 selection:text-amber-900 font-sans">
       
-      {/* Admin Utility Bar - ONLY shown to authenticated store manager */}
-      {isAdmin && (
-        <div className="bg-stone-900 text-stone-200 px-4 py-2 text-xs flex flex-wrap items-center justify-between gap-2 border-b border-amber-600/40 z-30 sticky top-0 shadow-md">
-          <div className="flex items-center gap-2">
-            <span className="inline-block w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
-            <span className="font-semibold text-white">Store Admin:</span>
-            <span className="text-stone-400 font-mono text-[11px]">mishalbatool572@gmail.com</span>
-          </div>
-          <div className="flex items-center gap-2">
-            <button
-              onClick={() => {
-                setAdminInitialOpenAdd(true);
-                setIsAdminOpen(true);
-              }}
-              className="bg-amber-600 hover:bg-amber-700 text-white font-semibold px-3 py-1.5 rounded-lg text-xs flex items-center gap-1.5 transition-colors shadow-xs cursor-pointer"
-            >
-              <Plus className="w-3.5 h-3.5 stroke-[2.5]" />
-              <span>Add Product</span>
-            </button>
-            <button
-              onClick={() => {
-                setAdminInitialOpenAdd(false);
-                setIsAdminOpen(true);
-              }}
-              className="bg-stone-800 hover:bg-stone-700 text-stone-200 px-3 py-1.5 rounded-lg text-xs transition-colors cursor-pointer"
-            >
-              Manage Products ({products.length})
-            </button>
-            <button
-              onClick={async () => {
-                await logoutAdmin();
-                triggerToast("Admin session logged out");
-              }}
-              className="text-stone-400 hover:text-white px-2 py-1.5 text-xs transition-colors cursor-pointer"
-            >
-              Logout
-            </button>
-          </div>
-        </div>
-      )}
-
       {/* 1. Top Announcement Bar */}
       <AnnouncementBar />
 
