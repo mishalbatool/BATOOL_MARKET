@@ -1,20 +1,15 @@
-import React, { useState, useEffect, useRef } from 'react';
-import { Product, ReviewItem } from '../types';
+import React, { useState, useEffect } from 'react';
+import { Product } from '../types';
 import { 
   X, 
   MessageCircle, 
   ShoppingBag, 
   Truck, 
   Banknote, 
-  Star, 
   Check, 
   Share2, 
-  Video, 
   Layers, 
-  Palette,
-  MessageSquare,
-  Copy,
-  Send
+  Palette
 } from 'lucide-react';
 import { SafeProductImage } from './SafeProductImage';
 import { getProductShareUrl } from '../services/productService';
@@ -25,7 +20,6 @@ interface ProductDetailsModalProps {
   onClose: () => void;
   onAddToCart: (product: Product, quantity: number, selectedSize?: string, selectedColor?: string) => void;
   onOrderWhatsApp: (product: Product, quantity: number, selectedSize?: string, selectedColor?: string) => void;
-  onAddReview?: (productId: string, review: ReviewItem) => void;
 }
 
 export const ProductDetailsModal: React.FC<ProductDetailsModalProps> = ({
@@ -34,9 +28,7 @@ export const ProductDetailsModal: React.FC<ProductDetailsModalProps> = ({
   onClose,
   onAddToCart,
   onOrderWhatsApp,
-  onAddReview,
 }) => {
-  const [selectedMedia, setSelectedMedia] = useState<'image' | 'video'>('image');
   const [selectedImage, setSelectedImage] = useState<string>('');
   const [selectedSize, setSelectedSize] = useState<string>('');
   const [selectedColor, setSelectedColor] = useState<string>('');
@@ -44,24 +36,14 @@ export const ProductDetailsModal: React.FC<ProductDetailsModalProps> = ({
   const [addedToast, setAddedToast] = useState(false);
   const [copiedLink, setCopiedLink] = useState(false);
 
-  // Review submission state
-  const [newReviewAuthor, setNewReviewAuthor] = useState('');
-  const [newReviewRating, setNewReviewRating] = useState(5);
-  const [newReviewComment, setNewReviewComment] = useState('');
-  const [reviewSubmittedToast, setReviewSubmittedToast] = useState(false);
-
-  const videoRef = useRef<HTMLVideoElement>(null);
-
   useEffect(() => {
     if (product) {
-      setSelectedMedia('image');
       setSelectedImage(product.image);
       setSelectedSize(product.sizes && product.sizes.length > 0 ? product.sizes[0] : '');
       setSelectedColor(product.colors && product.colors.length > 0 ? product.colors[0] : '');
       setQuantity(1);
       setAddedToast(false);
       setCopiedLink(false);
-      setReviewSubmittedToast(false);
     }
   }, [product]);
 
@@ -75,14 +57,11 @@ export const ProductDetailsModal: React.FC<ProductDetailsModalProps> = ({
   const isOutOfStock = stock <= 0 || product.status === 'out_of_stock';
   const isLowStock = !isOutOfStock && (stock <= 5 || product.status === 'low_stock');
   const price = Number(product.price) || 0;
-  const salePrice = Number(product.salePrice) || price;
+  const hasDiscount = product.discountPrice !== undefined && product.discountPrice !== null && Number(product.discountPrice) > 0;
+  const salePrice = hasDiscount ? Number(product.discountPrice) : (Number(product.salePrice) > 0 ? Number(product.salePrice) : price);
   const discountPercent = typeof product.discountPercent === 'number'
     ? product.discountPercent
     : (price > salePrice && price > 0 ? Math.round(((price - salePrice) / price) * 100) : 0);
-
-  const productReviews = product.reviews || [];
-  const reviewsCount = productReviews.length > 0 ? productReviews.length : (product.reviewsCount ?? 1);
-  const ratingValue = Number(product.rating ?? 5.0).toFixed(1);
 
   const handleAdd = () => {
     onAddToCart(product, quantity, selectedSize, selectedColor);
@@ -99,28 +78,6 @@ export const ProductDetailsModal: React.FC<ProductDetailsModalProps> = ({
       // Fallback
       prompt("Copy Product Link:", url);
     });
-  };
-
-  const handleSubmitReview = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!newReviewAuthor.trim() || !newReviewComment.trim()) return;
-
-    const newRev: ReviewItem = {
-      id: 'rev_' + Date.now(),
-      author: newReviewAuthor.trim(),
-      rating: Number(newReviewRating),
-      comment: newReviewComment.trim(),
-      date: new Date().toISOString().split('T')[0],
-    };
-
-    if (onAddReview) {
-      onAddReview(product.id, newRev);
-    }
-
-    setNewReviewAuthor('');
-    setNewReviewComment('');
-    setReviewSubmittedToast(true);
-    setTimeout(() => setReviewSubmittedToast(false), 3000);
   };
 
   return (
@@ -140,112 +97,44 @@ export const ProductDetailsModal: React.FC<ProductDetailsModalProps> = ({
           {/* Left Column: Product Gallery & Media */}
           <div className="p-5 sm:p-6 bg-[#F5F2EA] flex flex-col justify-between border-b md:border-b-0 md:border-r border-stone-200">
             <div>
-              {/* Media Switching Tabs (Images vs Video) */}
-              {product.video && (
-                <div className="flex items-center gap-2 mb-3">
-                  <button
-                    type="button"
-                    onClick={() => setSelectedMedia('image')}
-                    className={`text-xs font-semibold px-3 py-1.5 rounded-lg transition-all flex items-center gap-1.5 ${
-                      selectedMedia === 'image'
-                        ? 'bg-stone-900 text-white shadow-xs'
-                        : 'bg-white/80 text-stone-600 hover:bg-white'
-                    }`}
-                  >
-                    <span>Photos ({allImages.length})</span>
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setSelectedMedia('video')}
-                    className={`text-xs font-semibold px-3 py-1.5 rounded-lg transition-all flex items-center gap-1.5 ${
-                      selectedMedia === 'video'
-                        ? 'bg-stone-900 text-white shadow-xs'
-                        : 'bg-white/80 text-stone-600 hover:bg-white'
-                    }`}
-                  >
-                    <Video className="w-3.5 h-3.5 text-amber-500" />
-                    <span>Watch Video</span>
-                  </button>
-                </div>
-              )}
-
               {/* Main Media Viewport */}
               <div className="w-full aspect-square rounded-2xl overflow-hidden border border-stone-300/80 bg-white relative shadow-inner">
-                {selectedMedia === 'video' && product.video ? (
-                  <div className="w-full h-full bg-black flex items-center justify-center relative">
-                    <video
-                      ref={videoRef}
-                      src={product.video}
-                      controls
-                      controlsList="nodownload nofullscreen noremoteplayback"
-                      disablePictureInPicture
-                      onContextMenu={(e) => e.preventDefault()}
-                      className="w-full h-full object-contain"
-                      playsInline
-                    />
-                  </div>
-                ) : (
-                  <>
-                    <SafeProductImage
-                      src={selectedImage || product.image}
-                      alt={product.name}
-                      className="w-full h-full object-cover object-center"
-                    />
+                <SafeProductImage
+                  src={selectedImage || product.image}
+                  alt={product.name}
+                  className="w-full h-full object-cover object-center"
+                />
 
-                    {discountPercent > 0 && (
-                      <span className="absolute top-3 left-3 bg-amber-700 text-white text-xs font-bold px-2.5 py-1 rounded-md shadow-xs">
-                        {discountPercent}% OFF
-                      </span>
-                    )}
-
-                    {product.newArrival && (
-                      <span className="absolute top-3 right-3 bg-stone-900 text-white text-xs font-bold px-2.5 py-1 rounded-md shadow-xs">
-                        NEW ARRIVAL
-                      </span>
-                    )}
-                  </>
+                {discountPercent > 0 && (
+                  <span className="absolute top-3 left-3 bg-amber-700 text-white text-xs font-bold px-2.5 py-1 rounded-md shadow-xs">
+                    {discountPercent}% OFF
+                  </span>
                 )}
               </div>
 
               {/* Thumbnails Row */}
-              <div className="flex items-center gap-2 mt-3 overflow-x-auto pb-2 scrollbar-thin">
-                {allImages.map((img, idx) => (
-                  <button
-                    key={idx}
-                    type="button"
-                    onClick={() => {
-                      setSelectedMedia('image');
-                      setSelectedImage(img);
-                    }}
-                    className={`relative w-14 h-14 rounded-xl overflow-hidden shrink-0 border-2 transition-all ${
-                      selectedMedia === 'image' && selectedImage === img
-                        ? 'border-amber-700 ring-2 ring-amber-700/20 scale-102 shadow-xs'
-                        : 'border-stone-300 opacity-70 hover:opacity-100 bg-white'
-                    }`}
-                  >
-                    <SafeProductImage
-                      src={img}
-                      alt={`${product.name} thumbnail ${idx + 1}`}
-                      className="w-full h-full object-cover"
-                    />
-                  </button>
-                ))}
-
-                {product.video && (
-                  <button
-                    type="button"
-                    onClick={() => setSelectedMedia('video')}
-                    className={`relative w-14 h-14 rounded-xl overflow-hidden shrink-0 border-2 transition-all flex flex-col items-center justify-center bg-stone-900 text-white ${
-                      selectedMedia === 'video'
-                        ? 'border-amber-500 ring-2 ring-amber-500/20 scale-102'
-                        : 'border-stone-400 opacity-80 hover:opacity-100'
-                    }`}
-                  >
-                    <Video className="w-5 h-5 text-amber-400" />
-                    <span className="text-[9px] font-bold mt-0.5">Video</span>
-                  </button>
-                )}
-              </div>
+              {allImages.length > 1 && (
+                <div className="flex items-center gap-2 mt-3 overflow-x-auto pb-2 scrollbar-thin">
+                  {allImages.map((img, idx) => (
+                    <button
+                      key={idx}
+                      type="button"
+                      onClick={() => setSelectedImage(img)}
+                      className={`relative w-14 h-14 rounded-xl overflow-hidden shrink-0 border-2 transition-all ${
+                        selectedImage === img
+                          ? 'border-amber-700 ring-2 ring-amber-700/20 scale-102 shadow-xs'
+                          : 'border-stone-300 opacity-70 hover:opacity-100 bg-white'
+                      }`}
+                    >
+                      <SafeProductImage
+                        src={img}
+                        alt={`${product.name} thumbnail ${idx + 1}`}
+                        className="w-full h-full object-cover"
+                      />
+                    </button>
+                  ))}
+                </div>
+              )}
             </div>
 
             {/* Quick Benefits Guarantees */}
@@ -311,22 +200,11 @@ export const ProductDetailsModal: React.FC<ProductDetailsModalProps> = ({
                 {product.name}
               </h1>
 
-              {/* Rating and Reviews Summary */}
-              <div className="flex items-center gap-2 text-xs">
-                <div className="flex items-center text-amber-500">
-                  {[...Array(5)].map((_, i) => (
-                    <Star key={i} className="w-3.5 h-3.5 fill-current" />
-                  ))}
+              {product.sku && (
+                <div className="text-xs text-stone-500 font-mono">
+                  SKU: {product.sku}
                 </div>
-                <span className="font-bold text-stone-800">{ratingValue}</span>
-                <span className="text-stone-500">({reviewsCount} customer reviews)</span>
-                {product.sku && (
-                  <>
-                    <span className="text-stone-300">|</span>
-                    <span className="text-stone-500 font-mono text-[11px]">SKU: {product.sku}</span>
-                  </>
-                )}
-              </div>
+              )}
 
               {/* Price Banner */}
               <div className="p-4 bg-stone-100 rounded-2xl border border-stone-200 flex items-baseline justify-between">
@@ -419,88 +297,6 @@ export const ProductDetailsModal: React.FC<ProductDetailsModalProps> = ({
                 <p className="whitespace-pre-line text-stone-600">
                   {product.description || product.shortDescription}
                 </p>
-              </div>
-
-              {/* Customer Reviews Section */}
-              <div className="pt-3 border-t border-stone-200">
-                <div className="flex items-center justify-between mb-2">
-                  <h3 className="font-bold text-stone-900 text-xs uppercase tracking-wider flex items-center gap-1.5">
-                    <MessageSquare className="w-3.5 h-3.5 text-amber-700" />
-                    <span>Customer Reviews ({productReviews.length})</span>
-                  </h3>
-                </div>
-
-                {/* List existing reviews */}
-                {productReviews.length > 0 ? (
-                  <div className="space-y-2 max-h-36 overflow-y-auto pr-1">
-                    {productReviews.map((rev) => (
-                      <div key={rev.id} className="bg-white p-2.5 rounded-xl border border-stone-200 text-xs">
-                        <div className="flex items-center justify-between mb-1">
-                          <span className="font-bold text-stone-800">{rev.author}</span>
-                          <div className="flex items-center gap-1 text-amber-500">
-                            {[...Array(rev.rating)].map((_, i) => (
-                              <Star key={i} className="w-3 h-3 fill-current" />
-                            ))}
-                            <span className="text-[10px] text-stone-400 ml-1">{rev.date}</span>
-                          </div>
-                        </div>
-                        <p className="text-stone-600">{rev.comment}</p>
-                      </div>
-                    ))}
-                  </div>
-                ) : (
-                  <p className="text-stone-500 text-xs italic bg-white/60 p-2 rounded-lg border border-stone-200/80">
-                    No verified customer reviews yet. Be the first to review this product!
-                  </p>
-                )}
-
-                {/* Submit quick review form */}
-                <form onSubmit={handleSubmitReview} className="mt-3 bg-white p-3 rounded-xl border border-stone-200 space-y-2">
-                  <span className="text-[11px] font-bold text-stone-800 block">Write a Customer Review</span>
-                  <div className="grid grid-cols-2 gap-2">
-                    <input
-                      type="text"
-                      placeholder="Your Name"
-                      value={newReviewAuthor}
-                      onChange={(e) => setNewReviewAuthor(e.target.value)}
-                      required
-                      className="text-xs px-2.5 py-1.5 rounded-lg border border-stone-300 focus:outline-none focus:ring-1 focus:ring-amber-600"
-                    />
-                    <select
-                      value={newReviewRating}
-                      onChange={(e) => setNewReviewRating(Number(e.target.value))}
-                      className="text-xs px-2.5 py-1.5 rounded-lg border border-stone-300 focus:outline-none focus:ring-1 focus:ring-amber-600 bg-white"
-                    >
-                      <option value={5}>⭐⭐⭐⭐⭐ (5 Stars)</option>
-                      <option value={4}>⭐⭐⭐⭐ (4 Stars)</option>
-                      <option value={3}>⭐⭐⭐ (3 Stars)</option>
-                      <option value={2}>⭐⭐ (2 Stars)</option>
-                      <option value={1}>⭐ (1 Star)</option>
-                    </select>
-                  </div>
-                  <div className="flex gap-2">
-                    <input
-                      type="text"
-                      placeholder="Share your honest feedback about quality, delivery..."
-                      value={newReviewComment}
-                      onChange={(e) => setNewReviewComment(e.target.value)}
-                      required
-                      className="flex-1 text-xs px-2.5 py-1.5 rounded-lg border border-stone-300 focus:outline-none focus:ring-1 focus:ring-amber-600"
-                    />
-                    <button
-                      type="submit"
-                      className="bg-stone-900 hover:bg-stone-800 text-white text-xs font-semibold px-3 py-1.5 rounded-lg shrink-0 flex items-center gap-1"
-                    >
-                      <Send className="w-3 h-3" />
-                      <span>Post</span>
-                    </button>
-                  </div>
-                  {reviewSubmittedToast && (
-                    <span className="text-[11px] text-emerald-600 font-semibold block">
-                      ✓ Thank you! Your review was submitted.
-                    </span>
-                  )}
-                </form>
               </div>
 
             </div>

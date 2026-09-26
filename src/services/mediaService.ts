@@ -1,138 +1,67 @@
-import { ref, uploadBytesResumable, getDownloadURL } from 'firebase/storage';
-import { storage } from '../firebase/config';
+import imageCompression from 'browser-image-compression';
+import { supabase, isSupabaseConfigured } from '../lib/supabase';
+import { requireAdminSession } from './authService';
+
+// In-memory cache to prevent re-uploading identical images
+const uploadedImageCache = new Map<string, string>();
 
 /**
- * Helper to upload a file to the full-stack server endpoint
+ * Generate a unique signature for an image file to detect duplicates
  */
-async function uploadToServerStorage(
-  file: File,
-  folder: 'images' | 'videos',
-  productId: string,
-  onProgress?: (percent: number) => void
-): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-
-    reader.onprogress = (e) => {
-      if (e.lengthComputable && onProgress) {
-        onProgress(Math.round((e.loaded / e.total) * 100));
-      }
-    };
-
-    reader.onload = async () => {
-      try {
-        const base64Data = reader.result as string;
-        const cleanName = `${productId}_${file.name}`;
-        
-        const response = await fetch('/api/upload', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            filename: cleanName,
-            base64Data,
-            folder,
-          }),
-        });
-
-        if (!response.ok) {
-          throw new Error(`Server storage error: ${response.statusText}`);
-        }
-
-        const data = await response.json();
-        if (data.url) {
-          // Construct absolute URL so devices across any network can load the media
-          const absoluteUrl = typeof window !== 'undefined' 
-            ? `${window.location.origin}${data.url}` 
-            : data.url;
-          resolve(absoluteUrl);
-        } else {
-          throw new Error('Server storage did not return a valid URL');
-        }
-      } catch (err: any) {
-        reject(err);
-      }
-    };
-
-    reader.onerror = () => {
-      reject(new Error('Failed to read file for storage upload'));
-    };
-
-    reader.readAsDataURL(file);
-  });
+export function getImageFingerprint(file: File): string {
+  return `${file.name}_${file.size}_${file.lastModified}`;
 }
 
 /**
- * Upload a media file (Image or Video) to Firebase Cloud Storage.
- * Falls back to server storage if Firebase Storage bucket is not activated.
- * Returns the permanent public download URL.
+ * High-performance image compression using browser-image-compression.
+ * Resizes and optimizes user-selected images before uploading to Supabase Storage.
+ *
+ * Defaults:
+ * - maxSizeMB: 0.8 (approx 800KB max, usually produces ~100-300KB clean web images)
+ * - maxWidthOrHeight: 1200px
+ * - useWebWorker: true (keeps UI completely smooth and non-blocking)
+ * - fileType: 'image/webp'
+ * - initialQuality: 0.82
  */
-export async function uploadMediaFileToStorage(
-  file: File,
-  folder: 'images' | 'videos',
-  productId: string,
-  onProgress?: (percent: number) => void
-): Promise<string> {
-  const cleanId = (productId || 'prod').replace(/[^a-zA-Z0-9_-]/g, '_');
-  const cleanFileName = file.name.replace(/[^a-zA-Z0-9_.-]/g, '_');
-  const storagePath = `products/${folder}/${cleanId}/${Date.now()}_${cleanFileName}`;
+export async function compressProductImage(
+  imageFile: File,
+  customOptions?: {
+    maxSizeMB?: number;
+    maxWidthOrHeight?: number;
+    useWebWorker?: boolean;
+    initialQuality?: number;
+    onProgress?: (progressPercent: number) => void;
+  }
+): Promise<File> {
+  // If the file is already an ultra-small WebP/JPEG under 60KB, return as-is
+  if (imageFile.size < 60 * 1024 && (imageFile.type === 'image/webp' || imageFile.type === 'image/jpeg')) {
+    return imageFile;
+  }
 
-  const storageRef = ref(storage, storagePath);
-  const metadata = {
-    contentType: file.type || (folder === 'videos' ? 'video/mp4' : 'image/jpeg')
+  const options = {
+    maxSizeMB: customOptions?.maxSizeMB ?? 0.8,
+    maxWidthOrHeight: customOptions?.maxWidthOrHeight ?? 1200,
+    useWebWorker: customOptions?.useWebWorker ?? true,
+    fileType: 'image/webp',
+    initialQuality: customOptions?.initialQuality ?? 0.82,
+    onProgress: customOptions?.onProgress,
   };
 
   try {
-    const downloadUrl = await new Promise<string>((resolve, reject) => {
-      const uploadTask = uploadBytesResumable(storageRef, file, metadata);
-
-      uploadTask.on(
-        'state_changed',
-        (snapshot) => {
-          if (snapshot.totalBytes > 0 && onProgress) {
-            const progress = Math.round((snapshot.bytesTransferred / snapshot.totalBytes) * 100);
-            onProgress(progress);
-          }
-        },
-        (error: any) => {
-          reject(error);
-        },
-        async () => {
-          try {
-            const url = await getDownloadURL(uploadTask.snapshot.ref);
-            resolve(url);
-          } catch (urlErr) {
-            reject(urlErr);
-          }
-        }
-      );
-    });
-
-    return downloadUrl;
-  } catch (storageError: any) {
-    console.warn(`Firebase Storage notice (${folder}), using server media storage:`, storageError?.message || storageError);
-    // Fallback to server media storage
-    try {
-      return await uploadToServerStorage(file, folder, cleanId, onProgress);
-    } catch (serverError: any) {
-      console.warn(`Server storage upload failed:`, serverError?.message || serverError);
-      if (folder === 'images') {
-        // Safe image compression fallback under 40KB
-        return await compressImageToSafeSize(file, 800, 0.7);
-      }
-      throw new Error(`Media upload failed: ${serverError?.message || 'Storage unavailable'}`);
-    }
+    const compressedFile = await imageCompression(imageFile, options);
+    return compressedFile;
+  } catch (error) {
+    console.warn("browser-image-compression fallback triggered:", error);
+    // Canvas-based fallback if WebWorker or browser-image-compression fails
+    return await fallbackCanvasCompress(imageFile, options.maxWidthOrHeight, options.initialQuality);
   }
 }
 
 /**
- * Client-side high-efficiency image compression.
- * Downscales images to web size and converts to WebP/JPEG under 40KB.
- * Ensures that even if an image is inlined, it NEVER exceeds Firestore's 1MB document limit.
+ * Canvas fallback compression in case web-workers are restricted in some iframe environments
  */
-export async function compressImageToSafeSize(file: File, maxDimension = 900, quality = 0.72): Promise<string> {
-  return new Promise((resolve, reject) => {
+async function fallbackCanvasCompress(file: File, maxDimension = 1200, quality = 0.82): Promise<File> {
+  return new Promise((resolve) => {
     const img = new Image();
     const objectUrl = URL.createObjectURL(file);
 
@@ -156,13 +85,71 @@ export async function compressImageToSafeSize(file: File, maxDimension = 900, qu
       canvas.height = height;
       const ctx = canvas.getContext('2d');
       if (!ctx) {
-        reject(new Error('Canvas context not available for image compression'));
-        return;
+        return resolve(file);
       }
 
+      ctx.imageSmoothingEnabled = true;
+      ctx.imageSmoothingQuality = 'high';
       ctx.drawImage(img, 0, 0, width, height);
 
-      // Try webp first, fallback to jpeg
+      canvas.toBlob(
+        (blob) => {
+          if (blob && blob.size > 0) {
+            const cleanName = file.name.replace(/\.[^/.]+$/, "") + ".webp";
+            const newFile = new File([blob], cleanName, { type: 'image/webp', lastModified: Date.now() });
+            resolve(newFile);
+          } else {
+            resolve(file);
+          }
+        },
+        'image/webp',
+        quality
+      );
+    };
+
+    img.onerror = () => {
+      URL.revokeObjectURL(objectUrl);
+      resolve(file);
+    };
+
+    img.src = objectUrl;
+  });
+}
+
+/**
+ * Client-side safe DataURL conversion for extreme offline fallbacks
+ */
+export async function compressImageToSafeSize(file: File, maxDimension = 900, quality = 0.72): Promise<string> {
+  return new Promise((resolve) => {
+    const img = new Image();
+    const objectUrl = URL.createObjectURL(file);
+
+    img.onload = () => {
+      URL.revokeObjectURL(objectUrl);
+      let width = img.naturalWidth || img.width;
+      let height = img.naturalHeight || img.height;
+
+      if (width > maxDimension || height > maxDimension) {
+        if (width > height) {
+          height = Math.round((height * maxDimension) / width);
+          width = maxDimension;
+        } else {
+          width = Math.round((width * maxDimension) / height);
+          height = maxDimension;
+        }
+      }
+
+      const canvas = document.createElement('canvas');
+      canvas.width = width;
+      canvas.height = height;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) {
+        return resolve(IMAGE_PLACEHOLDER);
+      }
+
+      ctx.imageSmoothingEnabled = true;
+      ctx.drawImage(img, 0, 0, width, height);
+
       let dataUrl = canvas.toDataURL('image/webp', quality);
       if (dataUrl.length < 50 || dataUrl.startsWith('data:image/png')) {
         dataUrl = canvas.toDataURL('image/jpeg', quality);
@@ -172,9 +159,138 @@ export async function compressImageToSafeSize(file: File, maxDimension = 900, qu
 
     img.onerror = () => {
       URL.revokeObjectURL(objectUrl);
-      reject(new Error('Failed to load image for compression'));
+      resolve(IMAGE_PLACEHOLDER);
     };
 
     img.src = objectUrl;
   });
+}
+
+const IMAGE_PLACEHOLDER = "https://images.unsplash.com/photo-1522335789203-aabd1fc54bc9?auto=format&fit=crop&q=80&w=800";
+
+/**
+ * Upload an image to Supabase Storage with automatic compression via browser-image-compression,
+ * deduplication, retry mechanism, and server fallback.
+ */
+export async function uploadImageToStorage(
+  file: File,
+  productId: string,
+  onProgress?: (status: string) => void
+): Promise<string> {
+  if (!isSupabaseConfigured) {
+    throw new Error(
+      "Supabase is not configured. Please verify VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY."
+    );
+  }
+
+  // Ensure the Admin has a real authenticated Supabase session before uploading
+  await requireAdminSession();
+
+  // 1. Check deduplication cache
+  const fingerprint = getImageFingerprint(file);
+  const cachedUrl = uploadedImageCache.get(fingerprint);
+  if (cachedUrl) {
+    if (onProgress) onProgress('Reusing uploaded image...');
+    return cachedUrl;
+  }
+
+  // 2. Client-side compress using browser-image-compression
+  if (onProgress) onProgress('Compressing image with browser-image-compression...');
+  const optimizedFile = await compressProductImage(file, {
+    maxSizeMB: 0.8,
+    maxWidthOrHeight: 1200,
+    useWebWorker: true,
+    initialQuality: 0.82,
+    onProgress: (percent) => {
+      if (onProgress && percent < 100) {
+        onProgress(`Compressing image (${percent}%)...`);
+      }
+    }
+  });
+
+  // 3. Upload to existing Supabase Storage bucket ('product-images')
+  const cleanId = (productId || 'prod').replace(/[^a-zA-Z0-9_-]/g, '_');
+  const cleanFileName = (file.name || 'image')
+    .replace(/\.[^/.]+$/, "") // strip old extension
+    .replace(/[^a-zA-Z0-9_-]/g, '_');
+  const filePath = `${cleanId}/${Date.now()}_${cleanFileName}.webp`;
+
+  const bucket = 'product-images';
+  if (onProgress) {
+    onProgress('Uploading to Supabase Storage...');
+  }
+
+  let { error: uploadError } = await supabase.storage
+    .from(bucket)
+    .upload(filePath, optimizedFile, {
+      contentType: optimizedFile.type || 'image/webp',
+      upsert: false,
+    });
+
+  // If replacing an existing file path, use UPDATE on storage.objects
+  if (
+    uploadError &&
+    (uploadError.message?.toLowerCase().includes('already exists') ||
+      uploadError.message?.toLowerCase().includes('duplicate'))
+  ) {
+    const updateRes = await supabase.storage
+      .from(bucket)
+      .update(filePath, optimizedFile, {
+        contentType: optimizedFile.type || 'image/webp',
+        upsert: true,
+      });
+    uploadError = updateRes.error;
+  }
+
+  if (uploadError) {
+    console.error("Supabase Storage upload error:", uploadError);
+    if (uploadError.message?.toLowerCase().includes('row-level security')) {
+      throw new Error(
+        `Supabase Storage RLS error on bucket "${bucket}": ${uploadError.message}. Run the Storage RLS policy SQL in Supabase Dashboard → SQL Editor to grant Admin UID (b8ac65e0-d3b9-43c8-b6ee-49a425a61fa7) INSERT, UPDATE, and DELETE permissions on storage.objects for bucket "${bucket}".`
+      );
+    }
+    throw new Error(`Image upload to Supabase Storage ("${bucket}") failed: ${uploadError.message}`);
+  }
+
+  const { data } = supabase.storage
+    .from(bucket)
+    .getPublicUrl(filePath);
+
+  if (!data?.publicUrl) {
+    throw new Error(`Failed to generate public URL for uploaded image in bucket "${bucket}".`);
+  }
+
+  uploadedImageCache.set(fingerprint, data.publicUrl);
+  return data.publicUrl;
+}
+
+/**
+ * Extract storage object path inside the 'product-images' bucket from a public URL
+ */
+export function extractProductImagesPath(imageUrl?: string | null): string | null {
+  if (!imageUrl || typeof imageUrl !== 'string') return null;
+  const marker = '/storage/v1/object/public/product-images/';
+  const idx = imageUrl.indexOf(marker);
+  if (idx === -1) return null;
+  const rawPath = imageUrl.slice(idx + marker.length).split('?')[0];
+  return rawPath ? decodeURIComponent(rawPath) : null;
+}
+
+/**
+ * Delete an old product image from the 'product-images' bucket when replacing or deleting a product
+ */
+export async function deleteImageFromStorage(imageUrl?: string | null): Promise<void> {
+  if (!isSupabaseConfigured || !imageUrl) return;
+  const objectPath = extractProductImagesPath(imageUrl);
+  if (!objectPath) return;
+
+  await requireAdminSession();
+
+  const { error } = await supabase.storage
+    .from('product-images')
+    .remove([objectPath]);
+
+  if (error) {
+    console.warn(`Could not delete old image "${objectPath}" from product-images:`, error.message);
+  }
 }

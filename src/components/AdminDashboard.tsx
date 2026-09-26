@@ -1,13 +1,14 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { Product, CategoryName, ReviewItem } from '../types';
+import { Product, CategoryName } from '../types';
 import { EXACT_CATEGORIES, normalizeCategoryName } from '../data/categories';
 import { 
   loginAdmin, 
   logoutAdmin, 
   isCurrentlyAdmin, 
+  subscribeToAdminAuth,
   ADMIN_EMAIL 
 } from '../services/authService';
-import { uploadMediaFileToStorage, compressImageToSafeSize } from '../services/mediaService';
+import { uploadImageToStorage, compressProductImage } from '../services/mediaService';
 import { getProductShareUrl } from '../services/productService';
 import { SafeProductImage } from './SafeProductImage';
 import { 
@@ -18,7 +19,6 @@ import {
   X, 
   Upload, 
   Image as ImageIcon, 
-  Video, 
   Check, 
   AlertCircle, 
   Lock, 
@@ -28,7 +28,6 @@ import {
   Copy, 
   Layers, 
   Palette, 
-  Star, 
   Sparkles,
   ExternalLink,
   ShieldAlert
@@ -48,7 +47,17 @@ interface ImageItem {
   id: string;
   previewUrl: string;
   file?: File;
+  originalSize?: number;
+  compressedSize?: number;
   isExistingUrl?: boolean;
+}
+
+// Format bytes into readable KB/MB string
+function formatBytes(bytes?: number): string {
+  if (!bytes || bytes <= 0) return '';
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
 export const AdminDashboard: React.FC<AdminDashboardProps> = ({
@@ -82,31 +91,31 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   const [imageItems, setImageItems] = useState<ImageItem[]>([]);
   const [selectedMainImageIndex, setSelectedMainImageIndex] = useState<number>(0);
   const [newImageUrlInput, setNewImageUrlInput] = useState('');
-
-  // Video state
-  const [videoFile, setVideoFile] = useState<File | null>(null);
-  const [videoPreviewUrl, setVideoPreviewUrl] = useState<string>('');
-  const [videoUrlInput, setVideoUrlInput] = useState<string>('');
-  const [videoPreviewError, setVideoPreviewError] = useState(false);
+  const [isCompressingImages, setIsCompressingImages] = useState(false);
+  const [compressionProgressText, setCompressionProgressText] = useState('');
 
   // Sizes & Colors string inputs (comma separated)
   const [sizesInput, setSizesInput] = useState('');
   const [colorsInput, setColorsInput] = useState('');
-
-  // Reviews list management inside product edit
-  const [productReviews, setProductReviews] = useState<ReviewItem[]>([]);
 
   // Delete modal state
   const [productToDelete, setProductToDelete] = useState<Product | null>(null);
   const [isDeleting, setIsDeleting] = useState(false);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const videoFileInputRef = useRef<HTMLInputElement>(null);
+  const isSubmittingRef = useRef(false);
 
   const showToast = (msg: string) => {
     setToastMessage(msg);
     setTimeout(() => setToastMessage(null), 3500);
   };
+
+  // Sync with real Supabase Auth session state
+  useEffect(() => {
+    return subscribeToAdminAuth((status) => {
+      setIsAuthenticated(status);
+    });
+  }, []);
 
   // If initialOpenAdd was requested and authenticated, open add form immediately
   useEffect(() => {
@@ -156,32 +165,34 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
       category: 'Cosmetics',
       description: '',
       price: 1999,
-      salePrice: 1699,
+      discountPrice: null,
+      salePrice: undefined,
       stock: 15,
-      rating: 5.0,
-      reviewsCount: 1,
-      featured: false,
-      newArrival: true,
       sku: '',
     });
 
     setImageItems([]);
     setSelectedMainImageIndex(0);
     setNewImageUrlInput('');
-    setVideoFile(null);
-    setVideoPreviewUrl('');
-    setVideoUrlInput('');
-    setVideoPreviewError(false);
     setSizesInput('');
     setColorsInput('');
-    setProductReviews([]);
     setFormError(null);
     setIsFormOpen(true);
   };
 
   // Open "Edit Product" Clean Form with prefilled data
   const handleOpenEdit = (p: Product) => {
-    setEditingProduct({ ...p });
+    const existingDiscount =
+      p.discountPrice !== undefined && p.discountPrice !== null && Number(p.discountPrice) > 0
+        ? Number(p.discountPrice)
+        : p.salePrice && p.salePrice < p.price
+          ? Number(p.salePrice)
+          : null;
+
+    setEditingProduct({
+      ...p,
+      discountPrice: existingDiscount,
+    });
 
     // Populate images
     const existingImgs = p.images && p.images.length > 0 
@@ -199,33 +210,73 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     setSelectedMainImageIndex(mainIdx >= 0 ? mainIdx : 0);
 
     setNewImageUrlInput('');
-    setVideoFile(null);
-    setVideoPreviewUrl(p.video || '');
-    setVideoUrlInput(p.video || '');
-    setVideoPreviewError(false);
     setSizesInput((p.sizes || []).join(', '));
     setColorsInput((p.colors || []).join(', '));
-    setProductReviews(p.reviews ? [...p.reviews] : []);
     setFormError(null);
     setIsFormOpen(true);
   };
 
-  // Handle multiple image file selection & preview
-  const handleImageFilesSelected = (e: React.ChangeEvent<HTMLInputElement>) => {
+  /**
+   * Helper function that resizes and compresses user-selected image files
+   * before storing and uploading them, ensuring optimized file sizes.
+   */
+  const processAndCompressSelectedImages = async (selectedFiles: File[]) => {
+    setIsCompressingImages(true);
+    setFormError(null);
+
+    const processedItems: ImageItem[] = [];
+
+    for (let i = 0; i < selectedFiles.length; i++) {
+      const rawFile = selectedFiles[i];
+      setCompressionProgressText(`Optimizing image ${i + 1} of ${selectedFiles.length}...`);
+
+      try {
+        // Compress and resize using browser-image-compression
+        const compressedFile = await compressProductImage(rawFile, {
+          maxSizeMB: 0.8,
+          maxWidthOrHeight: 1200,
+          useWebWorker: true,
+          initialQuality: 0.82,
+        });
+
+        const previewBlobUrl = URL.createObjectURL(compressedFile);
+
+        processedItems.push({
+          id: `file_${Date.now()}_${i}_${Math.random().toString(36).substring(2, 6)}`,
+          previewUrl: previewBlobUrl,
+          file: compressedFile,
+          originalSize: rawFile.size,
+          compressedSize: compressedFile.size,
+          isExistingUrl: false,
+        });
+      } catch (compressionErr) {
+        console.warn(`Direct compression issue on ${rawFile.name}, using original:`, compressionErr);
+        processedItems.push({
+          id: `file_${Date.now()}_${i}`,
+          previewUrl: URL.createObjectURL(rawFile),
+          file: rawFile,
+          originalSize: rawFile.size,
+          compressedSize: rawFile.size,
+          isExistingUrl: false,
+        });
+      }
+    }
+
+    setImageItems(prev => [...prev, ...processedItems]);
+    setIsCompressingImages(false);
+    setCompressionProgressText('');
+  };
+
+  // Handle multiple image file selection & automatic compression
+  const handleImageFilesSelected = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files;
     if (!files || files.length === 0) return;
 
-    const newItems: ImageItem[] = Array.from(files).map((file, idx) => ({
-      id: `file_${Date.now()}_${idx}`,
-      previewUrl: URL.createObjectURL(file),
-      file: file,
-      isExistingUrl: false,
-    }));
-
-    setImageItems(prev => [...prev, ...newItems]);
-
-    // Reset input
+    const fileList = Array.from(files);
+    // Reset input so re-selecting same file works
     if (fileInputRef.current) fileInputRef.current.value = '';
+
+    await processAndCompressSelectedImages(fileList);
   };
 
   // Add image by URL
@@ -259,40 +310,6 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     });
   };
 
-  // Handle video file upload
-  const handleVideoFileSelected = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-
-    if (file.size > 50 * 1024 * 1024) {
-      alert("Video file size is larger than 50MB. Please select a smaller video or enter a direct streaming URL.");
-      return;
-    }
-
-    if (videoPreviewUrl.startsWith('blob:')) {
-      URL.revokeObjectURL(videoPreviewUrl);
-    }
-
-    const objectUrl = URL.createObjectURL(file);
-    setVideoFile(file);
-    setVideoPreviewUrl(objectUrl);
-    setVideoUrlInput('');
-    setVideoPreviewError(false);
-
-    if (videoFileInputRef.current) videoFileInputRef.current.value = '';
-  };
-
-  // Handle removing video
-  const handleRemoveVideo = () => {
-    if (videoPreviewUrl.startsWith('blob:')) {
-      URL.revokeObjectURL(videoPreviewUrl);
-    }
-    setVideoFile(null);
-    setVideoPreviewUrl('');
-    setVideoUrlInput('');
-    setVideoPreviewError(false);
-  };
-
   // Copy product link with feedback
   const handleCopyLink = (p: Product) => {
     const url = getProductShareUrl(p);
@@ -308,18 +325,25 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     e.preventDefault();
     setFormError(null);
 
-    if (!editingProduct || !editingProduct.name?.trim() || !editingProduct.id?.trim()) {
-      setFormError('Please provide Product Name and Product ID.');
+    // Prevent duplicate submission if clicked more than once
+    if (isSubmittingRef.current || isSaving) {
       return;
     }
 
+    if (!editingProduct || !editingProduct.name?.trim()) {
+      setFormError('Please provide Product Name.');
+      return;
+    }
+
+    isSubmittingRef.current = true;
     setIsSaving(true);
     setSaveStatusText('Validating product details...');
 
     try {
-      const productId = editingProduct.id.trim();
+      const fallbackId = 'BM' + (products.length + 1).toString().padStart(3, '0');
+      const productId = (editingProduct.id || fallbackId).trim();
 
-      // 1. Process Images
+      // 1. Process Images: Compress client-side & Upload to Supabase Storage
       setSaveStatusText('Processing product images...');
       const finalImageUrls: string[] = [];
 
@@ -327,18 +351,13 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
         const item = imageItems[i];
         if (item.file) {
           setSaveStatusText(`Uploading image ${i + 1} of ${imageItems.length}...`);
-          try {
-            // Attempt upload to Firebase Storage
-            const downloadUrl = await uploadMediaFileToStorage(item.file, 'images', productId);
-            finalImageUrls.push(downloadUrl);
-          } catch (storageErr: any) {
-            console.warn("Storage upload notice, optimizing image fallback:", storageErr.message);
-            // If Storage bucket is not enabled yet in Firebase Console, compress down to web size (<35KB)
-            // so Firestore's 1MB document limit is never exceeded!
-            const safeDataUrl = await compressImageToSafeSize(item.file, 800, 0.7);
-            finalImageUrls.push(safeDataUrl);
-          }
-        } else {
+          const downloadUrl = await uploadImageToStorage(
+            item.file,
+            productId,
+            (status) => setSaveStatusText(`Image ${i + 1}/${imageItems.length}: ${status}`)
+          );
+          finalImageUrls.push(downloadUrl);
+        } else if (item.previewUrl) {
           finalImageUrls.push(item.previewUrl);
         }
       }
@@ -349,41 +368,19 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
 
       const mainImage = finalImageUrls[selectedMainImageIndex] || finalImageUrls[0];
 
-      // 2. Process Video
-      let finalVideoUrl: string | null = null;
-
-      if (videoFile) {
-        setSaveStatusText('Uploading video to Firebase Storage (0%)...');
-        try {
-          const downloadUrl = await uploadMediaFileToStorage(
-            videoFile,
-            'videos',
-            productId,
-            (percent) => {
-              setSaveStatusText(`Uploading video to Firebase Storage (${percent}%)...`);
-            }
-          );
-          finalVideoUrl = downloadUrl;
-        } catch (videoErr: any) {
-          // If storage bucket is not activated, notify admin clearly and abort!
-          throw new Error(
-            `Video upload failed: ${videoErr?.message || 'Storage error'}. If you don't have Storage enabled in Firebase Console, you can enter a direct streaming video URL instead.`
-          );
-        }
-      } else if (videoUrlInput.trim()) {
-        finalVideoUrl = videoUrlInput.trim();
-      } else if (editingProduct.video && !videoFile && videoPreviewUrl === editingProduct.video) {
-        finalVideoUrl = editingProduct.video;
-      }
-
-      // 3. Prepare product data
-      setSaveStatusText('Saving product to shared database...');
+      // 2. Prepare product data for Supabase
+      setSaveStatusText('Saving product to Supabase...');
 
       const price = Number(editingProduct.price) || 0;
-      const salePrice = editingProduct.salePrice !== undefined && editingProduct.salePrice !== null && Number(editingProduct.salePrice) > 0 
-        ? Number(editingProduct.salePrice) 
-        : price;
-      const discountPercent = price > salePrice
+      const rawDiscount = editingProduct.discountPrice;
+      const hasDiscount =
+        rawDiscount !== undefined &&
+        rawDiscount !== null &&
+        String(rawDiscount).trim() !== '' &&
+        Number(rawDiscount) > 0;
+      const discountPrice = hasDiscount ? Number(rawDiscount) : null;
+      const salePrice = discountPrice !== null ? discountPrice : price;
+      const discountPercent = price > salePrice && price > 0
         ? Math.round(((price - salePrice) / price) * 100)
         : 0;
 
@@ -410,25 +407,20 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
         shortDescription: editingProduct.shortDescription?.trim() || '',
         image: mainImage,
         images: finalImageUrls,
-        video: finalVideoUrl || undefined,
         price,
+        discountPrice,
         salePrice,
         discountPercent,
         stock,
         status,
         sizes: parsedSizes.length > 0 ? parsedSizes : [],
         colors: parsedColors.length > 0 ? parsedColors : [],
-        rating: Number(editingProduct.rating) || 5.0,
-        reviewsCount: productReviews.length > 0 ? productReviews.length : (Number(editingProduct.reviewsCount) || 1),
-        reviews: productReviews.length > 0 ? productReviews : [],
-        featured: Boolean(editingProduct.featured),
-        newArrival: Boolean(editingProduct.newArrival),
         sku: editingProduct.sku?.trim() || productId,
-        createdAt: editingProduct.createdAt || new Date().toISOString(),
+        createdAt: editingProduct.createdAt,
         updatedAt: new Date().toISOString(),
       };
 
-      // 4. Save and verify write in Firestore
+      // 3. Save to Supabase products table
       await onSaveProduct(completeProduct);
 
       setIsFormOpen(false);
@@ -438,6 +430,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
       setFormError(err?.message || "Unable to save product. Please try again.");
     } finally {
       setIsSaving(false);
+      isSubmittingRef.current = false;
     }
   };
 
@@ -699,11 +692,6 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                                 alt={product.name}
                                 className="w-full h-full object-cover"
                               />
-                              {product.video && (
-                                <div className="absolute bottom-0.5 right-0.5 bg-stone-900/80 p-0.5 rounded text-amber-400">
-                                  <Video className="w-2.5 h-2.5" />
-                                </div>
-                              )}
                             </div>
 
                             <div className="min-w-0 flex-1">
@@ -714,11 +702,6 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                                 <span className="text-[11px] text-stone-500 font-medium">
                                   {product.category}
                                 </span>
-                                {product.video && (
-                                  <span className="text-[10px] text-indigo-700 bg-indigo-50 px-1 rounded font-medium flex items-center gap-0.5">
-                                    <Video className="w-2.5 h-2.5" /> Video Available
-                                  </span>
-                                )}
                               </div>
 
                               <h4 className="text-xs sm:text-sm font-bold text-stone-900 truncate">
@@ -736,9 +719,6 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                                 )}
                                 <span className={isOutOfStock ? "text-red-600 font-bold" : "text-emerald-700 font-medium"}>
                                   Stock: {product.stock}
-                                </span>
-                                <span className="text-amber-600 flex items-center gap-0.5 font-medium">
-                                  <Star className="w-3 h-3 fill-current" /> {product.rating ?? 5.0} ({product.reviews?.length || product.reviewsCount || 1})
                                 </span>
                               </div>
                             </div>
@@ -868,7 +848,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                 </div>
               </div>
 
-              {/* Row 2: Price, Sale Price, Stock, Product ID */}
+              {/* Row 2: Price, Discount Price, Stock, Product ID */}
               <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
                 <div>
                   <label className="block font-bold text-stone-700 uppercase tracking-wider mb-1">
@@ -879,7 +859,12 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                     min="0"
                     required
                     value={editingProduct.price ?? ''}
-                    onChange={(e) => setEditingProduct({ ...editingProduct, price: Number(e.target.value) })}
+                    onChange={(e) =>
+                      setEditingProduct({
+                        ...editingProduct,
+                        price: e.target.value === '' ? ('' as any) : Number(e.target.value),
+                      })
+                    }
                     placeholder="2500"
                     className="w-full text-xs px-3 py-2 rounded-xl border border-stone-300 bg-white focus:outline-none focus:ring-1 focus:ring-amber-600"
                   />
@@ -892,8 +877,16 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                   <input
                     type="number"
                     min="0"
-                    value={editingProduct.salePrice ?? ''}
-                    onChange={(e) => setEditingProduct({ ...editingProduct, salePrice: Number(e.target.value) })}
+                    value={editingProduct.discountPrice ?? ''}
+                    onChange={(e) => {
+                      const raw = e.target.value;
+                      const numVal = raw === '' ? null : Number(raw);
+                      setEditingProduct({
+                        ...editingProduct,
+                        discountPrice: numVal,
+                        salePrice: numVal !== null && numVal > 0 ? numVal : undefined,
+                      });
+                    }}
                     placeholder="Optional sale price"
                     className="w-full text-xs px-3 py-2 rounded-xl border border-stone-300 bg-white focus:outline-none focus:ring-1 focus:ring-amber-600"
                   />
@@ -908,7 +901,12 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                     min="0"
                     required
                     value={editingProduct.stock ?? ''}
-                    onChange={(e) => setEditingProduct({ ...editingProduct, stock: Number(e.target.value) })}
+                    onChange={(e) =>
+                      setEditingProduct({
+                        ...editingProduct,
+                        stock: e.target.value === '' ? ('' as any) : Number(e.target.value),
+                      })
+                    }
                     placeholder="10"
                     className="w-full text-xs px-3 py-2 rounded-xl border border-stone-300 bg-white focus:outline-none focus:ring-1 focus:ring-amber-600"
                   />
@@ -1024,6 +1022,14 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                   </div>
                 </div>
 
+                {/* Compression Progress Notification */}
+                {isCompressingImages && (
+                  <div className="bg-amber-50 border border-amber-200 text-amber-900 px-3.5 py-2.5 rounded-xl flex items-center gap-2.5 text-xs font-medium animate-pulse">
+                    <RefreshCw className="w-4 h-4 animate-spin text-amber-700 shrink-0" />
+                    <span>{compressionProgressText || 'Compressing and resizing images with browser-image-compression...'}</span>
+                  </div>
+                )}
+
                 {/* Previews Grid */}
                 {imageItems.length > 0 ? (
                   <div className="grid grid-cols-3 sm:grid-cols-5 gap-2.5 pt-2">
@@ -1046,13 +1052,20 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
 
                           {/* Main badge */}
                           {isMain && (
-                            <span className="absolute top-1 left-1 bg-amber-700 text-white text-[9px] font-bold px-1.5 py-0.5 rounded shadow-xs">
+                            <span className="absolute top-1 left-1 bg-amber-700 text-white text-[9px] font-bold px-1.5 py-0.5 rounded shadow-xs z-10">
                               MAIN
                             </span>
                           )}
 
+                          {/* File size badge if compressed */}
+                          {item.compressedSize && (
+                            <span className="absolute bottom-1 right-1 bg-stone-900/85 backdrop-blur-xs text-white text-[8px] font-mono px-1 py-0.2 rounded shadow-xs z-10">
+                              {formatBytes(item.compressedSize)}
+                            </span>
+                          )}
+
                           {/* Hover action overlay */}
-                          <div className="absolute inset-0 bg-stone-950/60 opacity-0 group-hover:opacity-100 transition-opacity flex flex-col items-center justify-center gap-1 p-1">
+                          <div className="absolute inset-0 bg-stone-950/60 opacity-0 group-hover:opacity-100 transition-opacity flex flex-col items-center justify-center gap-1 p-1 z-20">
                             {!isMain && (
                               <button
                                 type="button"
@@ -1081,156 +1094,6 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                 )}
               </div>
 
-              {/* Row 6: PRODUCT VIDEO (UPLOAD OR URL, EMBEDDED STREAMING, PREVIEW) */}
-              <div className="bg-white p-4 rounded-xl border border-stone-200 space-y-3">
-                <div className="flex items-center justify-between">
-                  <label className="font-bold text-stone-800 uppercase tracking-wider flex items-center gap-1.5 text-xs">
-                    <Video className="w-4 h-4 text-amber-700" />
-                    <span>Product Video (Optional)</span>
-                  </label>
-                  <span className="text-[11px] text-stone-500">
-                    Protected playback on product page
-                  </span>
-                </div>
-
-                <div className="flex flex-col sm:flex-row gap-2">
-                  <button
-                    type="button"
-                    onClick={() => videoFileInputRef.current?.click()}
-                    className="bg-stone-900 hover:bg-stone-800 text-white px-3.5 py-2 rounded-xl font-semibold flex items-center justify-center gap-1.5 shrink-0 transition-all shadow-xs cursor-pointer"
-                  >
-                    <Upload className="w-3.5 h-3.5" />
-                    <span>Upload Video File (MP4/WebM)</span>
-                  </button>
-
-                  <input
-                    ref={videoFileInputRef}
-                    type="file"
-                    accept="video/*"
-                    onChange={handleVideoFileSelected}
-                    className="hidden"
-                  />
-
-                  <div className="flex-1 flex gap-2">
-                    <input
-                      type="url"
-                      placeholder="Or paste streaming video URL (MP4, Cloudinary)..."
-                      value={videoUrlInput}
-                      onChange={(e) => {
-                        setVideoUrlInput(e.target.value);
-                        setVideoPreviewUrl(e.target.value);
-                        setVideoFile(null);
-                        setVideoPreviewError(false);
-                      }}
-                      className="flex-1 text-xs px-3 py-1.5 rounded-xl border border-stone-300 focus:outline-none focus:ring-1 focus:ring-amber-600"
-                    />
-                    {videoPreviewUrl && (
-                      <button
-                        type="button"
-                        onClick={handleRemoveVideo}
-                        className="bg-red-50 text-red-600 hover:bg-red-100 px-3 py-1.5 rounded-xl font-semibold shrink-0 cursor-pointer"
-                      >
-                        Remove
-                      </button>
-                    )}
-                  </div>
-                </div>
-
-                {/* Video Preview */}
-                {videoPreviewUrl && (
-                  <div className="mt-2 p-2 bg-stone-900 rounded-xl max-w-sm">
-                    <video
-                      src={videoPreviewUrl}
-                      controls
-                      controlsList="nodownload nofullscreen noremoteplayback"
-                      disablePictureInPicture
-                      onContextMenu={(e) => e.preventDefault()}
-                      onError={() => setVideoPreviewError(true)}
-                      className="w-full max-h-48 rounded-lg object-contain bg-black"
-                      playsInline
-                    />
-                    {videoPreviewError && (
-                      <p className="text-red-400 text-[10px] mt-1">
-                        Could not load video preview. Please verify URL format.
-                      </p>
-                    )}
-                  </div>
-                )}
-              </div>
-
-              {/* Row 7: Rating & Reviews Management */}
-              <div className="bg-white p-4 rounded-xl border border-stone-200 space-y-3">
-                <div className="flex items-center justify-between">
-                  <label className="font-bold text-stone-800 uppercase tracking-wider flex items-center gap-1.5 text-xs">
-                    <Star className="w-4 h-4 text-amber-500 fill-amber-500" />
-                    <span>Rating & Reviews Management</span>
-                  </label>
-                  <div className="flex items-center gap-2">
-                    <span className="text-[11px] text-stone-500">Displayed Rating:</span>
-                    <select
-                      value={editingProduct.rating ?? 5.0}
-                      onChange={(e) => setEditingProduct({ ...editingProduct, rating: Number(e.target.value) })}
-                      className="text-xs px-2 py-1 rounded border border-stone-300 bg-stone-50"
-                    >
-                      <option value={5.0}>5.0 ⭐⭐⭐⭐⭐</option>
-                      <option value={4.8}>4.8 ⭐⭐⭐⭐⭐</option>
-                      <option value={4.5}>4.5 ⭐⭐⭐⭐</option>
-                      <option value={4.0}>4.0 ⭐⭐⭐⭐</option>
-                      <option value={3.5}>3.5 ⭐⭐⭐</option>
-                    </select>
-                  </div>
-                </div>
-
-                {/* List existing reviews with delete button for admin */}
-                {productReviews.length > 0 ? (
-                  <div className="space-y-1.5 max-h-32 overflow-y-auto">
-                    {productReviews.map((rev, rIdx) => (
-                      <div key={rev.id || rIdx} className="flex items-center justify-between bg-stone-50 p-2 rounded-lg border border-stone-200 text-[11px]">
-                        <div>
-                          <span className="font-bold text-stone-800">{rev.author}</span>
-                          <span className="text-amber-600 font-bold ml-1.5">({rev.rating}★)</span>:
-                          <span className="text-stone-600 ml-1 italic">"{rev.comment}"</span>
-                        </div>
-                        <button
-                          type="button"
-                          onClick={() => setProductReviews(prev => prev.filter((_, idx) => idx !== rIdx))}
-                          className="text-red-600 hover:text-red-800 text-[10px] font-semibold ml-2 cursor-pointer"
-                        >
-                          Delete
-                        </button>
-                      </div>
-                    ))}
-                  </div>
-                ) : (
-                  <p className="text-stone-400 text-[11px] italic">
-                    No customer reviews on this product yet.
-                  </p>
-                )}
-              </div>
-
-              {/* Row 8: Flags */}
-              <div className="flex items-center gap-6 pt-1">
-                <label className="flex items-center gap-2 cursor-pointer font-semibold text-stone-800">
-                  <input
-                    type="checkbox"
-                    checked={Boolean(editingProduct.featured)}
-                    onChange={(e) => setEditingProduct({ ...editingProduct, featured: e.target.checked })}
-                    className="rounded text-amber-700 focus:ring-amber-600"
-                  />
-                  <span>Featured Product</span>
-                </label>
-
-                <label className="flex items-center gap-2 cursor-pointer font-semibold text-stone-800">
-                  <input
-                    type="checkbox"
-                    checked={Boolean(editingProduct.newArrival)}
-                    onChange={(e) => setEditingProduct({ ...editingProduct, newArrival: e.target.checked })}
-                    className="rounded text-amber-700 focus:ring-amber-600"
-                  />
-                  <span>New Arrival</span>
-                </label>
-              </div>
-
               {/* Actions Footer inside modal */}
               <div className="pt-4 border-t border-stone-200 flex items-center justify-end gap-3">
                 <button
@@ -1242,13 +1105,18 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                 </button>
                 <button
                   type="submit"
-                  disabled={isSaving}
+                  disabled={isSaving || isCompressingImages}
                   className="px-6 py-2 rounded-xl text-white bg-amber-700 hover:bg-amber-800 font-semibold shadow-md flex items-center gap-2 disabled:opacity-50 cursor-pointer"
                 >
                   {isSaving ? (
                     <>
                       <RefreshCw className="w-4 h-4 animate-spin" />
                       <span>{saveStatusText}</span>
+                    </>
+                  ) : isCompressingImages ? (
+                    <>
+                      <RefreshCw className="w-4 h-4 animate-spin" />
+                      <span>Optimizing Images...</span>
                     </>
                   ) : (
                     <>

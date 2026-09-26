@@ -10,14 +10,15 @@ async function startServer() {
   const app = express();
   const PORT = process.env.PORT || 3000;
 
-  // Increase payload limit for media uploads (up to 100MB for video)
-  app.use(express.json({ limit: '100mb' }));
-  app.use(express.urlencoded({ extended: true, limit: '100mb' }));
+  // Payload limit for optimized image uploads
+  app.use(express.json({ limit: '20mb' }));
+  app.use(express.urlencoded({ extended: true, limit: '20mb' }));
 
   // Ensure upload directories exist
   const uploadsDir = path.resolve(__dirname, 'public', 'uploads');
-  if (!fs.existsSync(uploadsDir)) {
-    fs.mkdirSync(uploadsDir, { recursive: true });
+  const imagesUploadDir = path.join(uploadsDir, 'images');
+  if (!fs.existsSync(imagesUploadDir)) {
+    fs.mkdirSync(imagesUploadDir, { recursive: true });
   }
 
   // Serve uploads statically
@@ -28,22 +29,16 @@ async function startServer() {
     }
   }));
 
-  // Upload API endpoint
+  // Upload API endpoint (images only)
   app.post('/api/upload', (req, res) => {
     try {
-      const { filename, base64Data, folder } = req.body;
+      const { filename, base64Data } = req.body;
       if (!filename || !base64Data) {
         return res.status(400).json({ error: 'Filename and base64Data are required' });
       }
 
-      const safeFolder = (folder === 'videos' ? 'videos' : 'images');
-      const targetFolder = path.join(uploadsDir, safeFolder);
-      if (!fs.existsSync(targetFolder)) {
-        fs.mkdirSync(targetFolder, { recursive: true });
-      }
-
       const cleanFileName = `${Date.now()}_${filename.replace(/[^a-zA-Z0-9_.-]/g, '_')}`;
-      const filePath = path.join(targetFolder, cleanFileName);
+      const filePath = path.join(imagesUploadDir, cleanFileName);
 
       // Remove base64 header if present (e.g. data:image/jpeg;base64,)
       const cleanBase64 = base64Data.replace(/^data:[^;]+;base64,/, '');
@@ -51,7 +46,7 @@ async function startServer() {
 
       fs.writeFileSync(filePath, buffer);
 
-      const fileUrl = `/uploads/${safeFolder}/${cleanFileName}`;
+      const fileUrl = `/uploads/images/${cleanFileName}`;
       return res.json({ success: true, url: fileUrl });
     } catch (err: any) {
       console.error('Server upload error:', err);

@@ -1,17 +1,15 @@
 import React, { useState, useEffect, useMemo, useCallback } from 'react';
-import { Product, CartItem, CategoryName, ActivePage, ReviewItem } from './types';
+import { Product, CartItem, CategoryName, ActivePage } from './types';
 import { 
   loadCartFromStorage, 
   saveCartToStorage
 } from './utils/storage';
 import { 
   subscribeToProducts, 
-  saveProductToFirestore, 
-  deleteProductFromFirestore, 
-  saveProductsLocalBackup,
-  loadProductsLocalBackup,
+  saveProductToSupabase, 
+  deleteProductFromSupabase, 
   fetchAllProductsOnce,
-  fetchProductByIdFromFirestore,
+  fetchProductByIdFromSupabase,
   extractProductIdFromUrl,
   getProductShareUrl
 } from './services/productService';
@@ -22,7 +20,7 @@ import { Header } from './components/Header';
 import { Hero } from './components/Hero';
 import { Benefits } from './components/Benefits';
 import { CategorySection } from './components/CategorySection';
-import { FeaturedProducts, NewArrivalsSection } from './components/FeaturedAndNewSections';
+import { FeaturedProducts } from './components/FeaturedAndNewSections';
 import { FreeDeliveryBanner, WhatsAppShoppingBanner } from './components/PromoBanners';
 import { WhyChooseUs } from './components/WhyChooseUs';
 import { ProductGrid } from './components/ProductGrid';
@@ -38,7 +36,7 @@ import { subscribeToAdminAuth, isCurrentlyAdmin, logoutAdmin } from './services/
 
 export default function App() {
   // 1. Core State
-  const [products, setProducts] = useState<Product[]>(() => loadProductsLocalBackup());
+  const [products, setProducts] = useState<Product[]>([]);
   const [isLoadingProducts, setIsLoadingProducts] = useState<boolean>(true);
   const [productsFetchError, setProductsFetchError] = useState<string | null>(null);
   const [cart, setCart] = useState<CartItem[]>([]);
@@ -108,11 +106,9 @@ export default function App() {
       });
   };
 
-  // Initialize and subscribe to Firestore shared database in real-time
+  // Initialize and subscribe to Supabase products in real-time
   useEffect(() => {
-    testFirebaseConnection();
-
-    // Subscribe to shared Firestore collection
+    // Subscribe to shared Supabase products table
     const unsubscribe = subscribeToProducts(
       (loadedProducts) => {
         setProducts(loadedProducts);
@@ -121,7 +117,7 @@ export default function App() {
       },
       (err) => {
         console.error("Products subscription error:", err);
-        setProductsFetchError(err.message || "Failed to sync products from Firestore.");
+        setProductsFetchError(err.message || "Failed to sync products from Supabase.");
         setIsLoadingProducts(false);
       }
     );
@@ -159,11 +155,11 @@ export default function App() {
       return;
     }
 
-    // 2. Fetch directly from Firestore by ID (guarantees product loads on cold refresh)
+    // 2. Fetch directly from Supabase by ID (guarantees product loads on cold refresh)
     let isCancelled = false;
     setIsLoadingDirectProduct(true);
 
-    fetchProductByIdFromFirestore(urlProductId)
+    fetchProductByIdFromSupabase(urlProductId)
       .then((fetchedProduct) => {
         if (isCancelled) return;
         if (fetchedProduct) {
@@ -208,7 +204,7 @@ export default function App() {
           setDetailsProduct(match);
           setProductNotFoundId(null);
         } else {
-          fetchProductByIdFromFirestore(urlProductId).then((fetched) => {
+          fetchProductByIdFromSupabase(urlProductId).then((fetched) => {
             if (fetched) {
               setDetailsProduct(fetched);
               setProductNotFoundId(null);
@@ -325,41 +321,18 @@ export default function App() {
     setWhatsAppModalProduct(product);
   };
 
-  // Add customer review to a product
-  const handleAddReview = async (productId: string, review: ReviewItem) => {
-    const target = products.find(p => p.id === productId);
-    if (!target) return;
-
-    const currentReviews = target.reviews || [];
-    const updatedReviews = [review, ...currentReviews];
-    const totalRatingSum = updatedReviews.reduce((sum, r) => sum + r.rating, 0);
-    const avgRating = Number((totalRatingSum / updatedReviews.length).toFixed(1));
-
-    const updatedProduct: Product = {
-      ...target,
-      reviews: updatedReviews,
-      reviewsCount: updatedReviews.length,
-      rating: avgRating,
-    };
-
-    // Save to Firestore shared database
-    await saveProductToFirestore(updatedProduct);
-    triggerToast("Thank you! Review published.");
-  };
-
-  // Admin Actions to Shared Database
+  // Admin Actions to Supabase Database
   const handleSaveProduct = async (product: Product) => {
-    // 1. Persist and verify in Firestore shared database FIRST.
-    // If Firestore write fails, this throws, preventing fake local saves!
-    await saveProductToFirestore(product);
+    // 1. Persist in Supabase products table FIRST.
+    const savedProduct = await saveProductToSupabase(product);
 
     // 2. Update React state immediately upon confirmed write
     setProducts(prev => {
-      const exists = prev.some(p => p.id === product.id);
+      const exists = prev.some(p => p.id === savedProduct.id || p.id === product.id);
       if (exists) {
-        return prev.map(p => p.id === product.id ? product : p);
+        return prev.map(p => (p.id === savedProduct.id || p.id === product.id) ? savedProduct : p);
       }
-      return [product, ...prev];
+      return [savedProduct, ...prev];
     });
 
     triggerToast(`Product saved successfully.`);
@@ -370,8 +343,8 @@ export default function App() {
       handleCloseProductDetails();
     }
 
-    // 1. Delete from Firestore shared database
-    await deleteProductFromFirestore(productId);
+    // 1. Delete from Supabase database
+    await deleteProductFromSupabase(productId);
 
     // 2. Remove from React state
     setProducts(prev => prev.filter(p => p.id !== productId));
@@ -482,16 +455,6 @@ export default function App() {
             {/* Free Delivery Promotional Banner */}
             <FreeDeliveryBanner onShopNow={handleShopNow} />
 
-            {/* New Arrivals Section */}
-            <NewArrivalsSection
-              products={products}
-              isLoading={isLoadingProducts}
-              onViewDetails={handleOpenProductDetails}
-              onOrderWhatsApp={handleOpenWhatsAppOrder}
-              onAddToCart={handleAddToCart}
-              onViewAll={handleShopNow}
-            />
-
             {/* WhatsApp Shopping Promo Banner */}
             <WhatsAppShoppingBanner />
 
@@ -556,7 +519,7 @@ export default function App() {
       />
 
       {/* 5. Modals and Slide-overs */}
-      {/* Product Details Modal with Video, Reviews, Link Sharing */}
+      {/* Product Details Modal with Video, Link Sharing */}
       <ProductDetailsModal
         product={detailsProduct}
         isOpen={Boolean(detailsProduct)}
@@ -566,7 +529,6 @@ export default function App() {
           handleCloseProductDetails();
           setWhatsAppModalProduct(prod);
         }}
-        onAddReview={handleAddReview}
       />
 
       {/* Loading overlay for direct product link */}

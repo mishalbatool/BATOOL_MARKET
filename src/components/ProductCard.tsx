@@ -1,6 +1,6 @@
 import React from 'react';
 import { Product } from '../types';
-import { ShoppingBag, MessageCircle, Eye, Star, Video } from 'lucide-react';
+import { ShoppingBag, MessageCircle, Eye } from 'lucide-react';
 import { SafeProductImage } from './SafeProductImage';
 
 interface ProductCardProps {
@@ -19,13 +19,11 @@ export const ProductCard: React.FC<ProductCardProps> = ({
   const isOutOfStock = (product.stock ?? 0) <= 0 || product.status === 'out_of_stock';
   const isLowStock = !isOutOfStock && ((product.stock ?? 0) <= 5 || product.status === 'low_stock');
   const price = Number(product.price) || 0;
-  const salePrice = Number(product.salePrice) || price;
+  const hasDiscount = product.discountPrice !== undefined && product.discountPrice !== null && Number(product.discountPrice) > 0;
+  const salePrice = hasDiscount ? Number(product.discountPrice) : (Number(product.salePrice) > 0 ? Number(product.salePrice) : price);
   const discountPercent = typeof product.discountPercent === 'number'
     ? product.discountPercent
     : (price > salePrice && price > 0 ? Math.round(((price - salePrice) / price) * 100) : 0);
-
-  const reviewsCount = product.reviewsCount ?? (product.reviews?.length || 1);
-  const ratingValue = Number(product.rating ?? 5.0).toFixed(1);
 
   return (
     <div className="group relative bg-white rounded-2xl border border-stone-200/90 hover:border-amber-400 overflow-hidden flex flex-col justify-between transition-all duration-300 hover:shadow-lg hover:-translate-y-0.5">
@@ -50,27 +48,7 @@ export const ProductCard: React.FC<ProductCardProps> = ({
               {discountPercent > 0 ? `${discountPercent}% OFF` : 'SALE'}
             </span>
           )}
-          {product.newArrival && (
-            <span className="bg-stone-900 text-white text-[10px] font-semibold px-2 py-0.5 rounded shadow-xs tracking-wider uppercase">
-              New
-            </span>
-          )}
-          {product.featured && !product.newArrival && (
-            <span className="bg-amber-600 text-white text-[10px] font-semibold px-2 py-0.5 rounded shadow-xs tracking-wider uppercase">
-              Featured
-            </span>
-          )}
         </div>
-
-        {/* Video Badge Indicator if product has video */}
-        {Boolean(product.video) && (
-          <div className="absolute bottom-2.5 left-2.5 z-10 pointer-events-none">
-            <span className="bg-stone-900/85 backdrop-blur-xs text-white text-[10px] font-medium px-2 py-0.5 rounded-full flex items-center gap-1 shadow-xs border border-white/20">
-              <Video className="w-3 h-3 text-amber-400" />
-              <span>Video</span>
-            </span>
-          </div>
-        )}
 
         {/* Stock Status Pill Top-Right */}
         <div className="absolute top-2.5 right-2.5 z-10 pointer-events-none">
@@ -105,16 +83,11 @@ export const ProductCard: React.FC<ProductCardProps> = ({
       {/* Card Body */}
       <div className="p-4 flex flex-col flex-grow justify-between">
         <div>
-          {/* Category & Rating */}
+          {/* Category */}
           <div className="flex items-center justify-between gap-1 text-[11px] text-stone-500 mb-1.5">
             <span className="truncate uppercase tracking-wider font-semibold text-amber-800">
               {product.category}
             </span>
-            <div className="flex items-center gap-1 shrink-0 text-amber-600" title={`${ratingValue} stars out of ${reviewsCount} reviews`}>
-              <Star className="w-3 h-3 fill-amber-500 text-amber-500" />
-              <span className="font-bold text-stone-700">{ratingValue}</span>
-              <span className="text-[10px] text-stone-400">({reviewsCount})</span>
-            </div>
           </div>
 
           {/* Title */}

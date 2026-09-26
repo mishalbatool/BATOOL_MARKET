@@ -144,8 +144,6 @@ export function processRawRowsForPreview(
     const rawPrice = getFieldValue(row, 'Original Price', 'Price', 'OriginalPrice', 'MRP');
     const rawSalePrice = getFieldValue(row, 'Sale Price', 'SalePrice', 'DiscountPrice', 'OfferPrice');
     const rawStock = getFieldValue(row, 'Stock', 'Quantity', 'Qty', 'stock');
-    const rawFeatured = getFieldValue(row, 'Featured', 'IsFeatured', 'featured');
-    const rawNewArrival = getFieldValue(row, 'New Arrival', 'NewArrival', 'IsNew', 'new');
     const rawSku = String(getFieldValue(row, 'SKU', 'Sku', 'sku') || '').trim();
 
     // Check minimum required
@@ -171,8 +169,6 @@ export function processRawRowsForPreview(
     const finalPrice = price > 0 ? price : salePrice;
 
     const stock = Math.max(0, Math.floor(parseNum(rawStock, 10)));
-    const featured = parseBool(rawFeatured);
-    const newArrival = parseBool(rawNewArrival);
 
     // Images
     const images: string[] = [];
@@ -196,8 +192,6 @@ export function processRawRowsForPreview(
       price: finalPrice,
       salePrice: salePrice > 0 ? salePrice : finalPrice,
       stock,
-      featured,
-      newArrival,
       sku: rawSku || undefined,
       isValid: true,
       statusConflict: isConflict ? 'exists' : 'new'
@@ -231,11 +225,7 @@ export function convertPreviewItemToProduct(item: ImportPreviewItem): Product {
     discountPercent,
     stock: item.stock,
     status,
-    featured: item.featured,
-    newArrival: item.newArrival,
     sku: item.sku,
-    rating: 5.0,
-    reviewsCount: 1,
     createdAt: new Date().toISOString()
   };
 }

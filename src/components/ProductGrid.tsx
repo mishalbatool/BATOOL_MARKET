@@ -30,7 +30,7 @@ interface ProductGridProps {
   onOpenAdmin?: () => void;
 }
 
-type SortOption = 'featured' | 'newest' | 'price-asc' | 'price-desc';
+type SortOption = 'default' | 'price-asc' | 'price-desc';
 
 export const ProductGrid: React.FC<ProductGridProps> = ({
   products,
@@ -46,7 +46,7 @@ export const ProductGrid: React.FC<ProductGridProps> = ({
   onAddToCart,
   onOpenAdmin,
 }) => {
-  const [sortBy, setSortBy] = useState<SortOption>('featured');
+  const [sortBy, setSortBy] = useState<SortOption>('default');
   const [maxPriceFilter, setMaxPriceFilter] = useState<number>(100000);
   const [inStockOnly, setInStockOnly] = useState<boolean>(false);
   const [showFiltersMobile, setShowFiltersMobile] = useState<boolean>(false);
@@ -108,18 +108,13 @@ export const ProductGrid: React.FC<ProductGridProps> = ({
       const aSalePrice = Number(a.salePrice) || Number(a.price) || 0;
       const bSalePrice = Number(b.salePrice) || Number(b.price) || 0;
 
-      if (sortBy === 'newest') {
-        return (b.newArrival ? 1 : 0) - (a.newArrival ? 1 : 0);
-      }
       if (sortBy === 'price-asc') {
         return aSalePrice - bSalePrice;
       }
       if (sortBy === 'price-desc') {
         return bSalePrice - aSalePrice;
       }
-      // 'featured'
-      if (a.featured && !b.featured) return -1;
-      if (!a.featured && b.featured) return 1;
+      // 'default' (preserve database ordering)
       return 0;
     });
   }, [products, selectedCategory, searchQuery, maxPriceFilter, inStockOnly, sortBy]);
@@ -129,7 +124,7 @@ export const ProductGrid: React.FC<ProductGridProps> = ({
     setSearchQuery('');
     setMaxPriceFilter(Math.max(highestPrice, 10000));
     setInStockOnly(false);
-    setSortBy('featured');
+    setSortBy('default');
   };
 
   return (
@@ -189,8 +184,7 @@ export const ProductGrid: React.FC<ProductGridProps> = ({
                 onChange={(e) => setSortBy(e.target.value as SortOption)}
                 className="text-xs text-stone-700 bg-transparent focus:outline-none font-medium pr-2 cursor-pointer"
               >
-                <option value="featured">Featured First</option>
-                <option value="newest">New Arrivals</option>
+                <option value="default">Default Order</option>
                 <option value="price-asc">Price: Low to High</option>
                 <option value="price-desc">Price: High to Low</option>
               </select>
